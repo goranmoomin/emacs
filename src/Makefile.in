@@ -784,6 +784,19 @@ doc.o: buildobj.h
 emacs.res: FORCE
 	$(MAKE) -C ../nt ../src/emacs.res
 
+## Shared-library build used by embemacs hosts.
+## On x86_64, configure/build with -fPIC.
+libemacs.dylib: $(ALLOBJS) $(LIBEGNU_ARCHIVE) $(EMACSRES) \
+		$(MAKE_PDUMPER_FINGERPRINT) $(etc)/DOC
+	$(AM_V_CCLD)$(CC) -dynamiclib -o $@ \
+		-install_name @rpath/libemacs.dylib \
+		$(ALL_CFLAGS) $(TEMACS_LDFLAGS) $(LDFLAGS) \
+		$(ALLOBJS) $(LIBEGNU_ARCHIVE) $(LIBES)
+	$(AM_V_at)$(MAKE_PDUMPER_FINGERPRINT) $@
+ifeq ($(DO_CODESIGN),yes)
+	codesign -s - -f $@
+endif
+
 .PHONY: ns-app
 ns-app: emacs$(EXEEXT) $(pdmp)
 	$(MAKE) -C ../nextstep all
@@ -792,7 +805,7 @@ ns-app: emacs$(EXEEXT) $(pdmp)
 .PHONY: versionclean
 
 mostlyclean:
-	rm -f android-emacs libemacs.so
+	rm -f android-emacs libemacs.so libemacs.dylib
 	rm -f temacs$(EXEEXT) core ./*.core \#* ./*.o build-counter.c
 	rm -f dmpstruct.h
 	rm -f emacs.pdmp
