@@ -37,6 +37,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "sysselect.h"
 #include "blockinput.h"
+#ifdef HAVE_NS
+# include "embfiber.h"
+# include "nsterm.h"
+#endif
 
 #ifdef HAVE_LINUX_FS_H
 # include <linux/fs.h>
@@ -1785,9 +1789,47 @@ deliver_thread_signal (int sig, signal_handler_t handler)
 }
 
 /* Handle bus errors, invalid instruction, etc.  */
+static volatile sig_atomic_t deferred_fatal_signal;
+
+static bool
+maybe_defer_fatal_signal (int sig)
+{
+#ifdef HAVE_NS
+  if (embfiber_active && !embfiber_on_fiber
+      && (sig == SIGTERM || sig == SIGHUP || sig == SIGINT))
+    {
+      if (deferred_fatal_signal == 0)
+        deferred_fatal_signal = sig;
+      pending_signals = true;
+      ns_wakeup_for_embfiber_signal ();
+      return true;
+    }
+#else
+  (void) sig;
+#endif
+  return false;
+}
+
+void
+process_deferred_fatal_signal (void)
+{
+  int sig = deferred_fatal_signal;
+
+  if (sig == 0)
+    return;
+
+  /* A fatal signal can arrive between the read and clear; the handler leaves
+     pending_signals set and writes another wakeup, so the race is benign.  */
+  deferred_fatal_signal = 0;
+  terminate_due_to_signal (sig, 40);
+}
+
 static void
 handle_fatal_signal (int sig)
 {
+  if (maybe_defer_fatal_signal (sig))
+    return;
+
   terminate_due_to_signal (sig, 40);
 }
 

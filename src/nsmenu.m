@@ -38,6 +38,8 @@ Carbon version by Yamamoto Mitsuharu. */
 #include "keyboard.h"
 #include "menu.h"
 #include "pdumper.h"
+#include "embemacs.h"
+#include "nsembed.h"
 
 #define NSMENUPROFILE 0
 
@@ -118,6 +120,14 @@ ns_update_menubar (struct frame *f, bool deep_p)
 
   inside++;
 #endif
+
+  if (embemacs_host_owns_app)
+    {
+#ifdef NS_IMPL_GNUSTEP
+      inside--;
+#endif
+      return;
+    }
 
   BOOL needsSet = NO;
   id menu = [NSApp mainMenu];
@@ -1077,7 +1087,7 @@ ns_menu_show (struct frame *f, int x, int y, int menuflags,
   popup_activated_flag = 1;
   tem = [pmenu runMenuAt: p forFrame: f keymaps: keymaps];
   popup_activated_flag = 0;
-  [[FRAME_NS_VIEW (SELECTED_FRAME ()) window] makeKeyWindow];
+  ns_make_frame_key_window (SELECTED_FRAME ());
   unbind_to (specpdl_count, Qnil);
   unblock_input ();
 
@@ -1241,16 +1251,19 @@ update_frame_tool_bar_1 (struct frame *f, EmacsToolbar *toolbar)
 void
 update_frame_tool_bar (struct frame *f)
 {
-  EmacsWindow *window = (EmacsWindow *)[FRAME_NS_VIEW (f) window];
+  NSWindow *frame_window = [FRAME_NS_VIEW (f) window];
+
+  if (![frame_window isKindOfClass:[EmacsWindow class]])
+    return;
+
+  EmacsWindow *window = (EmacsWindow *)frame_window;
   EmacsToolbar *toolbar = (EmacsToolbar *)[window toolbar];
 
-  if (!toolbar)
+  if (toolbar == nil)
     {
       [window createToolbar:f];
       return;
     }
-
-  if (window == nil || toolbar == nil) return;
 
   update_frame_tool_bar_1 (f, toolbar);
 }
@@ -1560,7 +1573,7 @@ pop_down_menu (void *arg)
 	 frame gets the keyboard focus but doesn't become
 	 highlighted.  */
 #ifdef NS_IMPL_COCOA
-      [[FRAME_NS_VIEW (SELECTED_FRAME ()) window] makeKeyWindow];
+      ns_make_frame_key_window (SELECTED_FRAME ());
 #endif
     }
 }
@@ -1944,7 +1957,7 @@ ns_popup_dialog (struct frame *f, Lisp_Object header, Lisp_Object contents)
                            timestamp: 0
                         windowNumber: [[NSApp mainWindow] windowNumber]
                              context: [NSApp context]
-                             subtype: 0
+                             subtype: NSAPP_SUBTYPE_EMACS
                                data1: 0
                                data2: 0];
 

@@ -474,6 +474,10 @@ enum ns_return_frame_mode
   int maximized_width, maximized_height;
   EmacsWindow *nonfs_window;
   BOOL fs_is_native;
+  BOOL embemacsEmbeddedInHostWindow;
+  BOOL embemacsHandlingFrameChange;
+  NSWindow *embemacsObservedHostWindow;
+  NSView *embemacsObservedSuperview;
 @public
   struct frame *emacsframe;
   int scrollbarsNeedingUpdate;
@@ -1179,6 +1183,8 @@ extern Lisp_Object ns_popup_dialog (struct frame *, Lisp_Object header,
 
 extern void ns_free_frame_resources (struct frame *);
 
+#define NSAPP_SUBTYPE_EMACS 0x454D
+
 #define NSAPP_DATA2_RUNASSCRIPT 10
 extern void ns_run_ascript (void);
 
@@ -1215,6 +1221,8 @@ extern size_t ns_image_size_in_bytes (void *img);
 
 /* Defined in nsterm.m.  */
 extern float ns_antialias_threshold;
+extern void ns_send_appdefined (int value);
+extern void ns_wakeup_for_embfiber_signal (void);
 extern void ns_make_frame_visible (struct frame *f);
 extern void ns_make_frame_invisible (struct frame *f);
 extern void ns_iconify_frame (struct frame *f);

@@ -29,6 +29,8 @@ GNUstep port and post-20 update by Adrian Robert (arobert@cogsci.ucsd.edu)
 /* This should be the first include, as it may set up #defines affecting
    interpretation of even the system includes.  */
 #include <config.h>
+#include "embemacs.h"
+#include "embfiber.h"
 
 #include <fcntl.h>
 #include <math.h>
@@ -46,6 +48,7 @@ GNUstep port and post-20 update by Adrian Robert (arobert@cogsci.ucsd.edu)
 #include "blockinput.h"
 #include "sysselect.h"
 #include "nsterm.h"
+#include "nsembed.h"
 #include "systime.h"
 #include "character.h"
 #include "xwidget.h"
@@ -1516,6 +1519,10 @@ ns_focus_frame (struct frame *f, bool noactivate)
   if (dpyinfo->ns_focus_frame != f)
     {
       EmacsView *view = FRAME_NS_VIEW (f);
+
+      if (embemacs_frame_embedded_p (f))
+        return; /* The host owns focus and z-order for its window.  */
+
       block_input ();
       [NSApp activateIgnoringOtherApps: YES];
       [[view window] makeKeyAndOrderFront: view];
@@ -1533,6 +1540,10 @@ ns_raise_frame (struct frame *f, BOOL make_key)
 
   check_window_system (f);
   view = FRAME_NS_VIEW (f);
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns z-order for its window.  */
+
   block_input ();
   if (FRAME_VISIBLE_P (f))
     {
@@ -1555,6 +1566,10 @@ ns_lower_frame (struct frame *f)
 
   check_window_system (f);
   view = FRAME_NS_VIEW (f);
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns z-order for its window.  */
+
   block_input ();
   [[view window] orderBack: NSApp];
   unblock_input ();
@@ -1632,9 +1647,18 @@ ns_make_frame_visible (struct frame *f)
   if (!FRAME_VISIBLE_P (f))
     {
       EmacsView *view = (EmacsView *)FRAME_NS_VIEW (f);
-      EmacsWindow *window = (EmacsWindow *)[view window];
+      EmacsWindow *window;
 
       SET_FRAME_VISIBLE (f, true);
+      if (embemacs_frame_embedded_p (f))
+        {
+          /* The host owns window visibility and z-order.  */
+          SET_FRAME_GARBAGED (f);
+          ns_send_appdefined (-1);
+          return;
+        }
+
+      window = (EmacsWindow *)[view window];
       ns_raise_frame (f, ! FRAME_NO_FOCUS_ON_MAP (f));
 
       /* Making a new frame from a fullscreen frame will make the new frame
@@ -1653,7 +1677,8 @@ ns_make_frame_visible (struct frame *f)
 
       /* Making a frame invisible seems to break the parent->child
          relationship, so reinstate it.  */
-      if ([window parentWindow] == nil && FRAME_PARENT_FRAME (f) != NULL)
+      if ([window isKindOfClass:[EmacsWindow class]]
+          && [window parentWindow] == nil && FRAME_PARENT_FRAME (f) != NULL)
         {
           block_input ();
           [window setParentChildRelationships];
@@ -1678,7 +1703,8 @@ ns_make_frame_invisible (struct frame *f)
   NSTRACE ("ns_make_frame_invisible");
   check_window_system (f);
   view = FRAME_NS_VIEW (f);
-  [[view window] orderOut: NSApp];
+  if (!embemacs_frame_embedded_p (f))
+    [[view window] orderOut: NSApp];
   SET_FRAME_VISIBLE (f, false);
   SET_FRAME_ICONIFIED (f, 0);
 }
@@ -1711,6 +1737,9 @@ ns_iconify_frame (struct frame *f)
 
   if (dpyinfo->highlight_frame == f)
     dpyinfo->highlight_frame = 0;
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns miniaturization for its window.  */
 
   if ([[view window] windowNumber] <= 0)
     {
@@ -1764,8 +1793,17 @@ ns_free_frame_resources (struct frame *f)
   if (f->output_data.ns->miniimage != nil)
     [f->output_data.ns->miniimage release];
 
-  [[view window] close];
-  [view removeFromSuperview];
+  if (embemacs_frame_embedded_p (f))
+    {
+      /* Remove only Emacs's view; the host owns the window lifetime.  */
+      [(EmacsView *)view embemacsRemoveHostWindowObservers];
+      [view removeFromSuperview];
+    }
+  else
+    {
+      [[view window] close];
+      [view removeFromSuperview];
+    }
   [view release];
 
   xfree (f->output_data.ns);
@@ -1783,6 +1821,13 @@ ns_destroy_window (struct frame *f)
   NSTRACE ("ns_destroy_window");
 
   check_window_system (f);
+
+  if (embemacs_frame_embedded_p (f))
+    {
+      ns_free_frame_resources (f);
+      ns_window_num--;
+      return;
+    }
 
   /* If this frame has a parent window, detach it as not doing so can
      cause a crash in GNUStep.  */
@@ -1857,6 +1902,13 @@ ns_set_offset (struct frame *f, int xoff, int yoff, int change_grav)
   if (view == nil)
     return;
 
+  if (embemacs_frame_embedded_p (f))
+    {
+      /* The host owns window geometry for embedded frames.  */
+      f->size_hint_flags &= ~(XNegative|YNegative);
+      return;
+    }
+
   block_input ();
 
   NSPoint topLeft = compute_offset (f, view, xoff, yoff);
@@ -1884,6 +1936,13 @@ ns_set_window_size (struct frame *f, bool change_gravity,
 
   if (view == nil)
     return;
+
+  if (embemacs_frame_embedded_p (f))
+    {
+      /* The host owns window size; resync to the host view bounds.  */
+      [view embemacsResizeFrameToSuperviewBounds];
+      return;
+    }
 
   NSTRACE_RECT ("current", [window frame]);
   NSTRACE_MSG ("Width:%d Height:%d", width, height);
@@ -1924,6 +1983,14 @@ ns_set_window_size_and_position (struct frame *f,
 
   if (view == nil)
     return;
+
+  if (embemacs_frame_embedded_p (f))
+    {
+      /* The host owns window geometry; resync to the host view bounds.  */
+      [view embemacsResizeFrameToSuperviewBounds];
+      f->size_hint_flags &= ~(XNegative|YNegative);
+      return;
+    }
 
   block_input ();
 
@@ -1969,6 +2036,13 @@ ns_set_undecorated (struct frame *f, Lisp_Object new_value, Lisp_Object old_valu
       EmacsView *view = (EmacsView *)FRAME_NS_VIEW (f);
       NSWindow *oldWindow = [view window];
       NSWindow *newWindow;
+
+      if (embemacs_frame_embedded_p (f))
+        {
+          /* The host owns window decoration for embedded frames.  */
+          FRAME_UNDECORATED (f) = !NILP (new_value);
+          return;
+        }
 
       block_input ();
 
@@ -2029,7 +2103,8 @@ ns_set_parent_frame (struct frame *f, Lisp_Object new_value, Lisp_Object old_val
   fset_parent_frame (f, new_value);
 
   block_input ();
-  [(EmacsWindow *)[FRAME_NS_VIEW (f) window] setParentChildRelationships];
+  if ([[FRAME_NS_VIEW (f) window] isKindOfClass:[EmacsWindow class]])
+    [(EmacsWindow *)[FRAME_NS_VIEW (f) window] setParentChildRelationships];
   unblock_input ();
 }
 
@@ -2081,28 +2156,33 @@ ns_set_z_group (struct frame *f, Lisp_Object new_value, Lisp_Object old_value)
 {
   EmacsView *view = (EmacsView *)FRAME_NS_VIEW (f);
   NSWindow *window = [view window];
+  bool embedded = embemacs_frame_embedded_p (f);
 
   NSTRACE ("ns_set_z_group");
 
   if (NILP (new_value))
     {
-      window.level = NSNormalWindowLevel;
+      if (!embedded)
+        window.level = NSNormalWindowLevel;
       FRAME_Z_GROUP (f) = z_group_none;
     }
   else if (EQ (new_value, Qabove))
     {
-      window.level = NSNormalWindowLevel + 1;
+      if (!embedded)
+        window.level = NSNormalWindowLevel + 1;
       FRAME_Z_GROUP (f) = z_group_above;
     }
   else if (EQ (new_value, Qabove_suspended))
     {
       /* Not sure what level this should be.  */
-      window.level = NSNormalWindowLevel + 1;
+      if (!embedded)
+        window.level = NSNormalWindowLevel + 1;
       FRAME_Z_GROUP (f) = z_group_above_suspended;
     }
   else if (EQ (new_value, Qbelow))
     {
-      window.level = NSNormalWindowLevel - 1;
+      if (!embedded)
+        window.level = NSNormalWindowLevel - 1;
       FRAME_Z_GROUP (f) = z_group_below;
     }
   else
@@ -2126,7 +2206,7 @@ ns_set_appearance (struct frame *f, Lisp_Object new_value, Lisp_Object old_value
 {
 #if MAC_OS_X_VERSION_MAX_ALLOWED >= 101000
   EmacsView *view = (EmacsView *)FRAME_NS_VIEW (f);
-  EmacsWindow *window = (EmacsWindow *)[view window];
+  NSWindow *window = [view window];
 
   NSTRACE ("ns_set_appearance");
 
@@ -2135,7 +2215,11 @@ ns_set_appearance (struct frame *f, Lisp_Object new_value, Lisp_Object old_value
 
   ns_set_appearance_1 (f, new_value);
 
-  [window setAppearance];
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns window appearance.  */
+
+  if ([window isKindOfClass:[EmacsWindow class]])
+    [(EmacsWindow *)window setAppearance];
 #endif /* MAC_OS_X_VERSION_MAX_ALLOWED >= 101000 */
 }
 
@@ -2148,6 +2232,9 @@ ns_set_transparent_titlebar (struct frame *f, Lisp_Object new_value,
   NSWindow *window = [view window];
 
   NSTRACE ("ns_set_transparent_titlebar");
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns titlebar style.  */
 
   if ([window respondsToSelector: @selector(titlebarAppearsTransparent)]
       && !EQ (new_value, old_value))
@@ -2168,6 +2255,9 @@ ns_fullscreen_hook (struct frame *f)
 
   if (!FRAME_VISIBLE_P (f))
     return;
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns fullscreen state.  */
 
   block_input ();
   [view handleFS];
@@ -2385,10 +2475,11 @@ ns_set_frame_alpha (struct frame *f)
   else if (0.0 <= alpha && alpha < alpha_min && alpha_min <= 1.0)
     alpha = alpha_min;
 
-  {
-    EmacsView *view = FRAME_NS_VIEW (f);
-    [[view window] setAlphaValue: alpha];
-  }
+  if (!embemacs_frame_embedded_p (f))
+    {
+      EmacsView *view = FRAME_NS_VIEW (f);
+      [[view window] setAlphaValue: alpha];
+    }
 }
 
 
@@ -5015,11 +5106,20 @@ emacs_get_runtime_helper (void)
   return emacs_runtime_helper;
 }
 
-static void
+void
+ns_wakeup_for_embfiber_signal (void)
+{
+  char c = 'f';
+
+  if (selfds[1] != -1)
+    emacs_write_sig (selfds[1], &c, 1);
+}
+
+void
 ns_send_appdefined (int value)
 /* --------------------------------------------------------------------------
-    Internal: post an appdefined event which EmacsApp-sendEvent will
-              recognize and take as a command to halt the event loop.
+    Internal: post an appdefined event which EmacsApp-sendEvent or the fiber
+              monitor will recognize as a command to halt the event loop.
    -------------------------------------------------------------------------- */
 {
   NSTRACE_WHEN (NSTRACE_GROUP_EVENTS, "ns_send_appdefined(%d)", value);
@@ -5064,7 +5164,7 @@ ns_send_appdefined (int value)
                                timestamp: 0
                             windowNumber: [[NSApp mainWindow] windowNumber]
                                  context: [NSApp context]
-                                 subtype: 0
+                                 subtype: NSAPP_SUBTYPE_EMACS
                                    data1: value
                                    data2: 0];
 
@@ -5102,8 +5202,13 @@ ns_fd_handler_common (void)
           FD_ZERO (&fds);
           FD_SET (selfds[0], &fds);
           result = pselect (selfds[0]+1, &fds, NULL, NULL, NULL, NULL);
-          if (result > 0 && read (selfds[0], &c, 1) == 1 && c == 'g')
-	    waiting = 0;
+          if (result > 0 && read (selfds[0], &c, 1) == 1)
+            {
+              if (c == 'g')
+                waiting = 0;
+              else if (c == 'f')
+                ns_send_appdefined (-1);
+            }
         }
       else
         {
@@ -5143,8 +5248,13 @@ ns_fd_handler_common (void)
             {
               if (FD_ISSET (selfds[0], &readfds))
                 {
-                  if (read (selfds[0], &c, 1) == 1 && c == 's')
-		    waiting = 1;
+                  if (read (selfds[0], &c, 1) == 1)
+                    {
+                      if (c == 's')
+                        waiting = 1;
+                      else if (c == 'f')
+                        ns_send_appdefined (-1);
+                    }
                 }
               else
                 {
@@ -5186,6 +5296,25 @@ ns_fd_handler_common (void)
 }
 
 @end
+
+void
+ns_embfiber_finish_appdefined_event (NSEvent *event, bool stop_run_loop)
+{
+  if ([NSApp modalWindow] == nil)
+    {
+      last_appdefined_event_data = [event data1];
+      if (stop_run_loop)
+        [NSApp stop:nil];
+      else
+        embfiber_resume ();
+    }
+  else
+    {
+      /* Re-arm posting so a later ns_send_appdefined can deliver the
+         deferred event, as -[EmacsApp sendEvent:] does.  */
+      send_appdefined = YES;
+    }
+}
 
 #if defined (NS_IMPL_COCOA) && MAC_OS_X_VERSION_MAX_ALLOWED >= 1070
 static void
@@ -5250,8 +5379,10 @@ ns_read_socket_1 (struct terminal *terminal, struct input_event *hold_quit,
       ns_init_events (&ev);
       q_event_ptr = hold_quit;
 
-      if (!no_release)
+      if (!no_release && !embfiber_active)
 	{
+	  /* In fiber mode, autoreleases belong to the host loop's thread pools;
+	     recycling the Emacs pool here would violate that ownership.  */
 	  /* We manage autorelease pools by allocate/reallocate each time around
 	     the loop; strict nesting is occasionally violated but seems not to
 	     matter... earlier methods using full nesting caused major memory leaks.  */
@@ -5281,7 +5412,13 @@ ns_read_socket_1 (struct terminal *terminal, struct input_event *hold_quit,
           send_appdefined = YES;
           ns_send_appdefined (-1);
 
-          [NSApp run];
+          /* On the fiber, the just-posted appdefined event will be
+             delivered by the host loop after we yield, and the local
+             monitor will resume us.  */
+          if (embfiber_on_fiber)
+            embfiber_park ();
+          else
+            [NSApp run];
         }
 
       nevents = n_emacs_events_pending;
@@ -5419,7 +5556,13 @@ ns_select_1 (int nfds, fd_set *readfds, fd_set *writefds,
   block_input ();
   ns_init_events (&event);
 
-  [NSApp run];
+  /* In fiber mode the host loop pumps events; the appdefined event
+     that would have stopped this nested run instead resumes the fiber
+     through the local monitor.  */
+  if (embfiber_on_fiber)
+    embfiber_park ();
+  else
+    [NSApp run];
 
   ns_finish_events ();
   if (nr > 0 && readfds)
@@ -6064,6 +6207,28 @@ ns_create_terminal (struct ns_display_info *dpyinfo)
   return terminal;
 }
 
+#ifdef NS_IMPL_COCOA
+static void
+ns_warm_up_foundation_and_clamp_nofile (void)
+{
+  /* Some functions/methods in CoreFoundation/Foundation increase the
+     maximum number of open files for the process in their first call.
+     [[NSFileHandle alloc] init] is a deliberate one-shot warm-up.
+     Then reduce the resource limit, since pselect cannot handle file
+     descriptors that are greater than or equal to FD_SETSIZE.  */
+  CFSocketGetTypeID ();
+  CFFileDescriptorGetTypeID ();
+  [[NSFileHandle alloc] init];
+
+  struct rlimit rlim;
+  if (getrlimit (RLIMIT_NOFILE, &rlim) == 0
+      && rlim.rlim_cur > FD_SETSIZE)
+    {
+      rlim.rlim_cur = FD_SETSIZE;
+      setrlimit (RLIMIT_NOFILE, &rlim);
+    }
+}
+#endif
 
 struct ns_display_info *
 ns_term_init (Lisp_Object display_name)
@@ -6127,8 +6292,12 @@ ns_term_init (Lisp_Object display_name)
   [EmacsApp sharedApplication];
   if (NSApp == nil)
     return NULL;
-  [NSApp setDelegate: NSApp];
-  emacs_runtime_helper = [[EmacsRuntimeHelper alloc] init];
+  /* The host owns the app delegate in host-owned-app mode.  */
+  if (!embemacs_host_owns_app)
+    [NSApp setDelegate: NSApp];
+
+  if (emacs_runtime_helper == nil)
+    emacs_runtime_helper = [[EmacsRuntimeHelper alloc] init];
 
   /* Start the select thread.  */
   [NSThread detachNewThreadSelector:@selector (fd_handler:)
@@ -6179,13 +6348,15 @@ ns_term_init (Lisp_Object display_name)
 
   delete_keyboard_wait_descriptor (0);
 
-  ns_app_name = [[NSProcessInfo processInfo] processName];
+  ns_app_name = [[[NSProcessInfo processInfo] processName] retain];
 
   /* Set up macOS app menu */
 
   NSTRACE_MSG ("Menu init");
 
 #ifdef NS_IMPL_COCOA
+  /* In host-owned-app mode do not hijack the host's menu bar.  */
+  if (!embemacs_host_owns_app)
   {
     NSMenu *appMenu;
     NSMenuItem *item;
@@ -6266,11 +6437,21 @@ ns_term_init (Lisp_Object display_name)
 
   /* If fullscreen is in init/default-frame-alist, focus isn't set
      right for fullscreen windows, so set this.  */
-  [NSApp activateIgnoringOtherApps:YES];
+  /* In host-owned-app mode the host decides activation policy.  */
+  if (!embemacs_host_owns_app)
+    [NSApp activateIgnoringOtherApps:YES];
 
   NSTRACE_MSG ("Call NSApp run");
 
-  [NSApp run];
+#ifdef NS_IMPL_COCOA
+  if (embemacs_host_owns_app)
+    {
+      /* Host app already finished launching: skip the handshake.  */
+      ns_warm_up_foundation_and_clamp_nofile ();
+    }
+  else
+#endif
+    [NSApp run];
   ns_do_open_file = YES;
 
 #ifdef NS_IMPL_GNUSTEP
@@ -6439,8 +6620,11 @@ ns_term_shutdown (int sig)
     }
 #endif
 
-  if (type == NSEventTypeApplicationDefined)
+  if (type == NSEventTypeApplicationDefined
+      && [theEvent subtype] == NSAPP_SUBTYPE_EMACS)
     {
+      /* In fiber mode, appdefined events are intercepted before sendEvent:
+         by the local monitor installed by embfiber_install_event_monitor.  */
       switch ([theEvent data2])
         {
 #ifdef NS_IMPL_COCOA
@@ -6462,7 +6646,8 @@ ns_term_shutdown (int sig)
       return;
     }
 
-  if (type == NSEventTypeApplicationDefined)
+  if (type == NSEventTypeApplicationDefined
+      && [theEvent subtype] == NSAPP_SUBTYPE_EMACS)
     {
       /* Events posted by ns_send_appdefined interrupt the run loop here.
          But, if a modal window is up, an appdefined can still come through,
@@ -6626,21 +6811,7 @@ ns_term_shutdown (int sig)
 #endif
 
 #ifdef NS_IMPL_COCOA
-  /* Some functions/methods in CoreFoundation/Foundation increase the
-     maximum number of open files for the process in their first call.
-     We make dummy calls to them and then reduce the resource limit
-     here, since pselect cannot handle file descriptors that are
-     greater than or equal to FD_SETSIZE.  */
-  CFSocketGetTypeID ();
-  CFFileDescriptorGetTypeID ();
-  [[NSFileHandle alloc] init];
-  struct rlimit rlim;
-  if (getrlimit (RLIMIT_NOFILE, &rlim) == 0
-      && rlim.rlim_cur > FD_SETSIZE)
-    {
-      rlim.rlim_cur = FD_SETSIZE;
-      setrlimit (RLIMIT_NOFILE, &rlim);
-    }
+  ns_warm_up_foundation_and_clamp_nofile ();
   if ([NSApp activationPolicy] == NSApplicationActivationPolicyProhibited) {
     /* Set the app's activation policy to regular when we run outside
        of a bundle.  This is already done for us by Info.plist when we
@@ -7027,6 +7198,8 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
    ========================================================================== */
 
 
+static bool embemacs_initial_embedded_frame_created;
+
 @implementation EmacsView
 
 - (void)windowDidEndLiveResize:(NSNotification *)notification
@@ -7047,11 +7220,7 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 {
   NSTRACE ("[EmacsView dealloc]");
 
-  /* Clear the view resize notification.  */
-  [[NSNotificationCenter defaultCenter]
-    removeObserver:self
-              name:NSViewFrameDidChangeNotification
-            object:nil];
+  [[NSNotificationCenter defaultCenter] removeObserver:self];
 
   if (fs_state == FULLSCREEN_BOTH)
     [nonfs_window release];
@@ -7233,6 +7402,8 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 
 - (void)keyDown: (NSEvent *)theEvent
 {
+  EMBFIBER_TRAMPOLINE ([self keyDown:theEvent]);
+
   Mouse_HLInfo *hlinfo = MOUSE_HL_INFO (emacsframe);
   int code;
   unsigned fnKeysym = 0;
@@ -7426,6 +7597,9 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 - (void) insertText: (id) string
    replacementRange: (NSRange) replacementRange
 {
+  EMBFIBER_TRAMPOLINE (
+    [self insertText:string replacementRange:replacementRange]);
+
   if ([string isKindOfClass:[NSAttributedString class]])
     string = [string string];
   [self unmarkText];
@@ -7436,6 +7610,10 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 	 selectedRange: (NSRange) selectedRange
       replacementRange: (NSRange) replacementRange
 {
+  EMBFIBER_TRAMPOLINE (
+    [self setMarkedText:string selectedRange:selectedRange
+       replacementRange:replacementRange]);
+
   [self setMarkedText: string selectedRange: selectedRange];
 }
 
@@ -7466,6 +7644,35 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 
 /* <NSTextInput> implementation (called through [super interpretKeyEvents:]).  */
 
+struct ns_embfiber_first_rect_call
+{
+  EmacsView *view;
+  NSRange range;
+  NSRect rect;
+};
+
+static void *
+ns_embfiber_first_rect (void *ptr)
+{
+  struct ns_embfiber_first_rect_call *call = ptr;
+  call->rect = [call->view firstRectForCharacterRange:call->range];
+  return call;
+}
+
+struct ns_embfiber_selected_range_call
+{
+  EmacsView *view;
+  NSRange range;
+};
+
+static void *
+ns_embfiber_selected_range (void *ptr)
+{
+  struct ns_embfiber_selected_range_call *call = ptr;
+  call->range = [call->view selectedRange];
+  return call;
+}
+
 /* <NSTextInput>: called when done composing;
    NOTE: also called when we delete over working text, followed
    immediately by doCommandBySelector: deleteBackward:  */
@@ -7475,6 +7682,8 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
   NSUInteger len;
 
   NSTRACE ("[EmacsView insertText:]");
+
+  EMBFIBER_TRAMPOLINE ([self insertText:aString]);
 
   if ([aString isKindOfClass:[NSAttributedString class]])
     s = [aString string];
@@ -7533,6 +7742,9 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 
   NSTRACE ("[EmacsView setMarkedText:selectedRange:]");
 
+  EMBFIBER_TRAMPOLINE (
+    [self setMarkedText:aString selectedRange:selRange]);
+
   if (NS_KEYLOG)
     NSLog (@"setMarkedText '%@' len =%lu range %lu from %lu",
            str, (unsigned long)[str length],
@@ -7563,6 +7775,8 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 - (void)deleteWorkingText
 {
   NSTRACE ("[EmacsView deleteWorkingText]");
+
+  EMBFIBER_TRAMPOLINE ([self deleteWorkingText]);
 
   if (workingText == nil)
     return;
@@ -7603,6 +7817,8 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
 
 - (void)unmarkText
 {
+  EMBFIBER_TRAMPOLINE ([self unmarkText]);
+
   NSTRACE ("[EmacsView unmarkText]");
 
   if (NS_KEYLOG)
@@ -7611,31 +7827,59 @@ ns_create_font_panel_buttons (id target, SEL select, SEL cancel_action)
   processingCompose = NO;
 }
 
-static Lisp_Object
-ns_in_echo_area_1 (void *ptr)
+struct ns_embfiber_safe_lisp_call
 {
+  void *(*fn) (void *);
+  void *arg;
+  void *result;
+};
+
+static Lisp_Object
+ns_embfiber_safe_lisp_call_1 (void *ptr)
+{
+  struct ns_embfiber_safe_lisp_call *call = ptr;
   const specpdl_ref count = SPECPDL_INDEX ();
   specbind (Qinhibit_quit, Qt);
-  const Lisp_Object in_echo_area = safe_calln (Qns_in_echo_area);
-  return unbind_to (count, in_echo_area);
+  call->result = call->fn (call->arg);
+  return unbind_to (count, Qnil);
 }
 
 static Lisp_Object
-ns_in_echo_area_2 (enum nonlocal_exit exit, Lisp_Object error)
+ns_embfiber_safe_lisp_call_2 (enum nonlocal_exit exit, Lisp_Object error)
 {
   return Qnil;
+}
+
+static void *
+ns_embfiber_safe_lisp_call_on_fiber (void *ptr)
+{
+  struct ns_embfiber_safe_lisp_call *call = ptr;
+  internal_catch_all (ns_embfiber_safe_lisp_call_1, call,
+                      ns_embfiber_safe_lisp_call_2);
+  return call;
+}
+
+static void *
+ns_embfiber_call_lisp_safely (void *(*fn) (void *), void *arg)
+{
+  struct ns_embfiber_safe_lisp_call call = { fn, arg, NULL };
+
+  if (!embfiber_copy_call_on (ns_embfiber_safe_lisp_call_on_fiber,
+                              &call, sizeof call))
+    return NULL;
+  return call.result;
+}
+
+static void *
+ns_in_echo_area_1 (void *ptr)
+{
+  return NILP (safe_calln (Qns_in_echo_area)) ? NULL : (void *) 1;
 }
 
 static bool
 ns_in_echo_area (void)
 {
-  Lisp_Object in_echo_area;
-
-  in_echo_area
-    = internal_catch_all (ns_in_echo_area_1, NULL,
-			  ns_in_echo_area_2);
-
-  return !NILP (in_echo_area);
+  return ns_embfiber_call_lisp_safely (ns_in_echo_area_1, NULL) != NULL;
 }
 
 /* Used to position char selection windows, etc.  */
@@ -7646,6 +7890,15 @@ ns_in_echo_area (void)
   struct window *win;
 
   NSTRACE ("[EmacsView firstRectForCharacterRange:]");
+
+  if (embfiber_active && !embfiber_on_fiber)
+    {
+      struct ns_embfiber_first_rect_call call = { self, theRange, NSZeroRect };
+
+      if (!embfiber_copy_call_on (ns_embfiber_first_rect, &call, sizeof call))
+        return NSZeroRect;
+      return call.rect;
+    }
 
   if (NS_KEYLOG)
     NSLog (@"firstRectForCharRange request");
@@ -7669,7 +7922,7 @@ ns_in_echo_area (void)
     {
 #endif
       rect.origin = pt;
-      rect = [(EmacsWindow *) [self window] convertRectToScreen: rect];
+      rect = [[self window] convertRectToScreen: rect];
 #if MAC_OS_X_VERSION_MIN_REQUIRED < 1070
     }
   else
@@ -7695,6 +7948,8 @@ ns_in_echo_area (void)
 
 - (void)doCommandBySelector: (SEL)aSelector
 {
+  EMBFIBER_TRAMPOLINE ([self doCommandBySelector:aSelector]);
+
   NSTRACE ("[EmacsView doCommandBySelector:]");
 
   if (NS_KEYLOG)
@@ -7723,6 +7978,17 @@ ns_in_echo_area (void)
 
 - (NSRange)selectedRange
 {
+  if (embfiber_active && !embfiber_on_fiber)
+    {
+      struct ns_embfiber_selected_range_call call
+        = { self, NSMakeRange (NSNotFound, 0) };
+
+      if (!embfiber_copy_call_on (ns_embfiber_selected_range,
+                                  &call, sizeof call))
+        return NSMakeRange (NSNotFound, 0);
+      return call.range;
+    }
+
   if (NS_KEYLOG)
     NSLog (@"selectedRange request");
 
@@ -7769,13 +8035,14 @@ ns_in_echo_area (void)
 /* End <NSTextInput> implementation.  */
 /*****************************************************************************/
 
-
 /* This is what happens when the user presses a mouse button.  */
 - (void)mouseDown: (NSEvent *)theEvent
 {
+  EMBFIBER_TRAMPOLINE ([self mouseDown:theEvent]);
+
   struct ns_display_info *dpyinfo = FRAME_DISPLAY_INFO (emacsframe);
   NSPoint p = [self convertPoint: [theEvent locationInWindow] fromView: nil];
-  EmacsWindow *window;
+  NSWindow *window;
 
   NSTRACE ("[EmacsView mouseDown:]");
 
@@ -7790,8 +8057,9 @@ ns_in_echo_area (void)
      button clicks.  */
   emacsframe->mouse_moved = 0;
 
-  window = (EmacsWindow *) [self window];
-  [window setLastDragEvent: theEvent];
+  window = [self window];
+  if ([window isKindOfClass:[EmacsWindow class]])
+    [(EmacsWindow *)window setLastDragEvent: theEvent];
 
   if ([theEvent type] == NSEventTypeScrollWheel)
     {
@@ -8055,6 +8323,8 @@ ns_in_echo_area (void)
 /* Tell emacs the mouse has moved.  */
 - (void)mouseMoved: (NSEvent *)e
 {
+  EMBFIBER_TRAMPOLINE ([self mouseMoved:e]);
+
   Mouse_HLInfo *hlinfo = MOUSE_HL_INFO (emacsframe);
   struct ns_display_info *dpyinfo = FRAME_DISPLAY_INFO (emacsframe);
   Lisp_Object frame;
@@ -8149,6 +8419,8 @@ ns_in_echo_area (void)
 #if defined NS_IMPL_COCOA && defined MAC_OS_X_VERSION_10_7
 - (void) magnifyWithEvent: (NSEvent *) event
 {
+  EMBFIBER_TRAMPOLINE ([self magnifyWithEvent:event]);
+
   NSPoint pt = [self convertPoint: [event locationInWindow] fromView: nil];
   static CGFloat last_scale;
 
@@ -8274,37 +8546,38 @@ ns_in_echo_area (void)
   if (rows < MINHEIGHT)
     rows = MINHEIGHT;
 #ifdef NS_IMPL_COCOA
-  {
-    /* This sets window title to have size in it; the wm does this under GS.  */
-    NSRect r = [[self window] frame];
-    if (r.size.height == frameSize.height && r.size.width == frameSize.width)
-      {
-        if (old_title != 0)
-          {
-            xfree (old_title);
-            old_title = 0;
-          }
-      }
-    else if (fs_state == FULLSCREEN_NONE && ! maximizing_resize
-             && [[self window] title] != NULL)
-      {
-        char *size_title;
-        NSWindow *window = [self window];
-        if (old_title == 0)
-          {
-            char *t = strdup ([[[self window] title] UTF8String]);
-            char *pos = strstr (t, "  —  ");
-            if (pos)
-              *pos = '\0';
-            old_title = t;
-          }
-        size_title = xmalloc (strlen (old_title) + 40);
-	esprintf (size_title, "%s  —  (%d × %d)", old_title, cols, rows);
-        [window setTitle: [NSString stringWithUTF8String: size_title]];
-        [window display];
-        xfree (size_title);
-      }
-  }
+  if (!embemacs_frame_embedded_p (emacsframe))
+    {
+      /* This sets window title to have size in it; the wm does this under GS.  */
+      NSRect r = [[self window] frame];
+      if (r.size.height == frameSize.height && r.size.width == frameSize.width)
+        {
+          if (old_title != 0)
+            {
+              xfree (old_title);
+              old_title = 0;
+            }
+        }
+      else if (fs_state == FULLSCREEN_NONE && ! maximizing_resize
+               && [[self window] title] != NULL)
+        {
+          char *size_title;
+          NSWindow *window = [self window];
+          if (old_title == 0)
+            {
+              char *t = strdup ([[[self window] title] UTF8String]);
+              char *pos = strstr (t, "  —  ");
+              if (pos)
+                *pos = '\0';
+              old_title = t;
+            }
+          size_title = xmalloc (strlen (old_title) + 40);
+          esprintf (size_title, "%s  —  (%d × %d)", old_title, cols, rows);
+          [window setTitle: [NSString stringWithUTF8String: size_title]];
+          [window display];
+          xfree (size_title);
+        }
+    }
 #endif /* NS_IMPL_COCOA */
 
   NSTRACE_MSG ("cols: %d  rows: %d", cols, rows);
@@ -8349,7 +8622,8 @@ ns_in_echo_area (void)
   [super viewDidEndLiveResize];
   if (old_title != 0)
     {
-      [[self window] setTitle: [NSString stringWithUTF8String: old_title]];
+      if (!embemacs_frame_embedded_p (emacsframe))
+        [[self window] setTitle: [NSString stringWithUTF8String: old_title]];
       xfree (old_title);
       old_title = 0;
     }
@@ -8358,34 +8632,26 @@ ns_in_echo_area (void)
 #endif /* NS_IMPL_COCOA */
 
 
+- (void)viewDidMoveToWindow
+{
+  [super viewDidMoveToWindow];
+  [self embemacsViewDidMoveToWindow];
+}
+
+
+- (void)viewDidMoveToSuperview
+{
+  [super viewDidMoveToSuperview];
+  [self embemacsViewDidMoveToSuperview];
+}
+
+
 - (void)resizeWithOldSuperviewSize: (NSSize)oldSize
 {
-  NSRect frame;
-  int width, height;
-
   NSTRACE ("[EmacsView resizeWithOldSuperviewSize:]");
 
   [super resizeWithOldSuperviewSize:oldSize];
-
-  if (! FRAME_LIVE_P (emacsframe))
-    return;
-
-  frame = [[self superview] bounds];
-  width = (int)NSWidth (frame);
-  height = (int)NSHeight (frame);
-
-  NSTRACE_SIZE ("New size", NSMakeSize (width, height));
-
-  /* Reset the frame size to match the bounds of the superview (the
-     NSWindow's contentView).  We need to do this as sometimes the
-     view's frame isn't resized correctly, or can end up with the
-     wrong origin.  */
-  [self setFrame:frame];
-  change_frame_size (emacsframe, width, height, false, YES, false);
-
-  SET_FRAME_GARBAGED (emacsframe);
-  cancel_mouse_face (emacsframe);
-  ns_send_appdefined (-1);
+  [self embemacsResizeFrameToSuperviewBounds];
 }
 
 
@@ -8398,6 +8664,8 @@ ns_in_echo_area (void)
 
 - (void)windowDidBecomeKey      /* for direct calls */
 {
+  EMBFIBER_TRAMPOLINE ([self windowDidBecomeKey]);
+
   struct ns_display_info *dpyinfo = FRAME_DISPLAY_INFO (emacsframe);
   struct frame *old_focus = dpyinfo->ns_focus_frame;
   struct input_event event;
@@ -8482,6 +8750,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 - (void)windowDidResignKey: (NSNotification *)notification
 /* cf. x_detect_focus_change(), x_focus_changed(), x_new_focus_frame() */
 {
+  EMBFIBER_TRAMPOLINE ([self windowDidResignKey:notification]);
+
   struct ns_display_info *dpyinfo = FRAME_DISPLAY_INFO (emacsframe);
   BOOL is_focus_frame = dpyinfo->ns_focus_frame == emacsframe;
   NSTRACE ("[EmacsView windowDidResignKey:]");
@@ -8551,6 +8821,10 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
   windowClosing = NO;
   processingCompose = NO;
+  embemacsEmbeddedInHostWindow = NO;
+  embemacsHandlingFrameChange = NO;
+  embemacsObservedHostWindow = nil;
+  embemacsObservedSuperview = nil;
   scrollbarsNeedingUpdate = 0;
   fs_state = FULLSCREEN_NONE;
   fs_before_fs = next_maximized = -1;
@@ -8599,18 +8873,24 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
   [self setLayerContentsRedrawPolicy:
           NSViewLayerContentsRedrawOnSetNeedsDisplay];
   [self setLayerContentsPlacement:NSViewLayerContentsPlacementTopLeft];
-
-  [[EmacsWindow alloc] initWithEmacsFrame:f];
-
-  /* Now the NSWindow has been created, we can finish up configuring
-     the layer.  */
-  [(EmacsLayer *)[self layer] setColorSpace:
-                   [[[self window] colorSpace] CGColorSpace]];
-  [(EmacsLayer *)[self layer] setContentsScale:
-                   [[self window] backingScaleFactor]];
-#else
-  [[EmacsWindow alloc] initWithEmacsFrame:f];
 #endif
+
+  if (embemacs_embed_parent_view)
+    {
+      embemacs_initial_embedded_frame_created = true;
+      [self embemacsEmbedIntoParentView:(NSView *) embemacs_embed_parent_view
+                                  frame:f];
+    }
+  else
+    {
+      if (embemacs_host_owns_app && !embemacs_initial_embedded_frame_created)
+        {
+          fputs ("embemacs: no embed parent view for initial frame\n", stderr);
+          emacs_abort ();
+        }
+      [[EmacsWindow alloc] initWithEmacsFrame:f];
+      [self embemacsUpdateLayerForHostWindow:[self window]];
+    }
 
   if (ns_drag_types)
     [self registerForDraggedTypes: ns_drag_types];
@@ -8970,6 +9250,9 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 {
   NSTRACE ("[EmacsView updateCollectionBehavior]");
 
+  if (embemacs_frame_embedded_p (emacsframe))
+    return; /* The host owns fullscreen collection behavior.  */
+
   if (! [self isFullscreen])
     {
       NSWindow *win = [self window];
@@ -9011,6 +9294,9 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
   NSColor *col;
 
   NSTRACE ("[EmacsView toggleFullScreen:]");
+
+  if (embemacs_frame_embedded_p (emacsframe))
+    return; /* The host owns fullscreen state for its window.  */
 
   /* Reset fs_is_native to value of ns-use-native-full-screen if not
      fullscreen already */
@@ -9115,6 +9401,13 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 {
   NSTRACE ("[EmacsView handleFS]");
 
+  if (embemacs_frame_embedded_p (emacsframe))
+    {
+      /* The host owns fullscreen and zoom state.  */
+      emacsframe->want_fullscreen = FULLSCREEN_NONE;
+      return;
+    }
+
   if (fs_state != emacsframe->want_fullscreen)
     {
       if (fs_state == FULLSCREEN_BOTH)
@@ -9198,6 +9491,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (void)mouseExited: (NSEvent *)theEvent
 {
+  EMBFIBER_TRAMPOLINE ([self mouseExited:theEvent]);
+
   Mouse_HLInfo *hlinfo = emacsframe ? MOUSE_HL_INFO (emacsframe) : NULL;
 
   NSTRACE ("[EmacsView mouseExited:]");
@@ -9218,6 +9513,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (instancetype)menuDown: sender
 {
+  EMBFIBER_TRAMPOLINE_RETURN (id, self, [self menuDown:sender]);
+
   NSTRACE ("[EmacsView menuDown:]");
   if (context_menu_value == -1)
     context_menu_value = [sender tag];
@@ -9237,6 +9534,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 /* This gets called on toolbar button click.  */
 - (instancetype)toolbarClicked: (id)item
 {
+  EMBFIBER_TRAMPOLINE_RETURN (id, self, [self toolbarClicked:item]);
+
   NSEvent *theEvent;
   int idx = [item tag] * TOOL_BAR_ITEM_NSLOTS;
 
@@ -9262,6 +9561,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (instancetype)toggleToolbar: (id)sender
 {
+  EMBFIBER_TRAMPOLINE_RETURN (id, self, [self toggleToolbar:sender]);
+
   NSTRACE ("[EmacsView toggleToolbar:]");
 
   if (!emacs_event)
@@ -9311,6 +9612,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 - (void)windowDidChangeBackingProperties:(NSNotification *)notification
   /* Update the drawing buffer when the backing properties change.  */
 {
+  EMBFIBER_TRAMPOLINE ([self windowDidChangeBackingProperties:notification]);
+
   NSTRACE ("EmacsView windowDidChangeBackingProperties:]");
 
   NSRect frame = [self frame];
@@ -9387,6 +9690,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
    appears to be safe to call redisplay here.  */
 - (void)layoutSublayersOfLayer:(CALayer *)layer
 {
+  EMBFIBER_TRAMPOLINE ([self layoutSublayersOfLayer:layer]);
+
   if (!redisplaying_p && FRAME_GARBAGED_P (emacsframe))
     {
       /* If there is IO going on when redisplay is run here Emacs
@@ -9410,6 +9715,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 {
   NSTRACE ("[EmacsView drawRect:" NSTRACE_FMT_RECT "]",
            NSTRACE_ARG_RECT(rect));
+
+  EMBFIBER_TRAMPOLINE ([self drawRect:rect]);
 
   if (!emacsframe || !emacsframe->output_data.ns)
     return;
@@ -9463,6 +9770,9 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (NSDragOperation) draggingUpdated: (id <NSDraggingInfo>) sender
 {
+  EMBFIBER_TRAMPOLINE_RETURN (
+    NSDragOperation, NSDragOperationNone, [self draggingUpdated:sender]);
+
 #ifdef NS_IMPL_GNUSTEP
   struct input_event ie;
 #else
@@ -9515,6 +9825,8 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (BOOL) performDragOperation: (id <NSDraggingInfo>) sender
 {
+  EMBFIBER_TRAMPOLINE_RETURN (BOOL, NO, [self performDragOperation:sender]);
+
   id pb, source;
   int x, y;
   NSString *type;
@@ -9635,6 +9947,10 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 - (id) validRequestorForSendType: (NSString *)typeSent
                       returnType: (NSString *)typeReturned
 {
+  EMBFIBER_TRAMPOLINE_RETURN (
+    id, nil, [self validRequestorForSendType:typeSent
+                                  returnType:typeReturned]);
+
   NSTRACE ("[EmacsView validRequestorForSendType:returnType:]");
   if (typeSent != nil && [ns_send_types indexOfObject: typeSent] != NSNotFound
       && typeReturned == nil)
@@ -9665,6 +9981,9 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
 
 - (BOOL) writeSelectionToPasteboard: (NSPasteboard *)pb types: (NSArray *)types
 {
+  EMBFIBER_TRAMPOLINE_RETURN (
+    BOOL, NO, [self writeSelectionToPasteboard:pb types:types]);
+
   NSArray *typesDeclared;
   Lisp_Object val;
 
@@ -10011,7 +10330,10 @@ static void cancel_ns_deferred_UAZoomChangeFocus_timer ()
   FOR_EACH_FRAME (tail, frame)
     {
       if (FRAME_PARENT_FRAME (XFRAME (frame)) == ourFrame)
-        [(EmacsWindow *)[FRAME_NS_VIEW (XFRAME (frame)) window] setParentChildRelationships];
+        if ([[FRAME_NS_VIEW (XFRAME (frame)) window]
+               isKindOfClass:[EmacsWindow class]])
+          [(EmacsWindow *)[FRAME_NS_VIEW (XFRAME (frame)) window]
+            setParentChildRelationships];
     }
 }
 
@@ -10136,6 +10458,9 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 #ifdef NS_IMPL_COCOA
 - (id)accessibilityAttributeValue:(NSString *)attribute
 {
+  EMBFIBER_TRAMPOLINE_RETURN (
+    id, nil, [self accessibilityAttributeValue:attribute]);
+
   Lisp_Object str = Qnil;
   struct frame *f = SELECTED_FRAME ();
   struct buffer *curbuf = XBUFFER (XWINDOW (f->selected_window)->contents);
@@ -10828,6 +11153,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 /* Set up emacs_event.  */
 - (void) sendScrollEventAtLoc: (float)loc fromEvent: (NSEvent *)e
 {
+  EMBFIBER_TRAMPOLINE ([self sendScrollEventAtLoc:loc fromEvent:e]);
+
   Lisp_Object win;
 
   NSTRACE ("[EmacsScroller sendScrollEventAtLoc:fromEvent:]");
@@ -10872,6 +11199,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    with hold-down.  */
 - (instancetype)repeatScroll: (NSTimer *)scrollEntry
 {
+  EMBFIBER_TRAMPOLINE_RETURN (id, self, [self repeatScroll:scrollEntry]);
+
   NSEvent *e = [[self window] currentEvent];
   NSPoint p =  [[self window] mouseLocationOutsideOfEventStream];
   BOOL inKnob = [self testPart: p] == NSScrollerKnob;
@@ -10907,6 +11236,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
    mouseDragged events without going into a modal loop.  */
 - (void)mouseDown: (NSEvent *)e
 {
+  EMBFIBER_TRAMPOLINE ([self mouseDown:e]);
+
   NSRect sr, kr;
   /* hitPart is only updated AFTER event is passed on.  */
   NSScrollerPart part = [self testPart: [e locationInWindow]];
@@ -11029,6 +11360,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 /* Called as we manually track scroller drags, rather than superclass.  */
 - (void)mouseDragged: (NSEvent *)e
 {
+    EMBFIBER_TRAMPOLINE ([self mouseDragged:e]);
+
     NSRect sr;
     double loc, pos;
     int length;
@@ -11087,6 +11420,8 @@ nswindow_orderedIndex_sort (id w1, id w2, void *c)
 /* Treat scrollwheel events in the bar as though they were in the main window.  */
 - (void) scrollWheel: (NSEvent *)theEvent
 {
+  EMBFIBER_TRAMPOLINE ([self scrollWheel:theEvent]);
+
   NSTRACE ("[EmacsScroller scrollWheel:]");
 
   EmacsView *view = (EmacsView *)FRAME_NS_VIEW (frame);

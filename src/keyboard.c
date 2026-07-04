@@ -8367,6 +8367,7 @@ void
 process_pending_signals (void)
 {
   pending_signals = false;
+  process_deferred_fatal_signal ();
   handle_async_input ();
   do_pending_atimers ();
 }

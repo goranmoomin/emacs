@@ -3878,6 +3878,7 @@ extern Lisp_Object memory_signal_data;
 
 extern bool volatile pending_signals;
 extern void process_pending_signals (void);
+extern void process_deferred_fatal_signal (void);
 extern void probably_quit (void);
 
 /* Check quit-flag and quit if it is non-nil.  Typing C-g does not

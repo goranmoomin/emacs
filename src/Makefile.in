@@ -310,7 +310,9 @@ MSDOS_X_OBJ =
 
 NS_OBJ=@NS_OBJ@
 ## nsterm.o nsfns.o nsmenu.o nsselect.o nsimage.o ns_fontfile if HAVE_NS.
-NS_OBJC_OBJ=@NS_OBJC_OBJ@
+NS_OBJC_BASE_OBJ=@NS_OBJC_OBJ@
+NSEMBED_OBJ=$(if $(NS_OBJC_BASE_OBJ),nsembed.o)
+NS_OBJC_OBJ=$(NS_OBJC_BASE_OBJ) $(NSEMBED_OBJ)
 ## Used only for GNUstep.
 GNU_OBJC_CFLAGS=$(patsubst -specs=%-hardened-cc1,,@GNU_OBJC_CFLAGS@)
 ## w32fns.o w32menu.c w32reg.o fringe.o fontset.o w32font.o w32term.o
@@ -463,7 +465,7 @@ base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	$(XWIDGETS_OBJ) 						       \
 	profiler.o decompress.o 					       \
 	thread.o systhread.o sqlite.o  treesit.o			       \
-	itree.o json.o embfiber.o					       \
+	itree.o json.o embemacs.o embfiber.o				       \
 	$(MSDOS_OBJ) $(MSDOS_X_OBJ) $(NS_OBJ) $(CYGWIN_OBJ) $(FONT_OBJ)        \
 	$(W32_OBJ) $(WINDOW_SYSTEM_OBJ) $(XGSELOBJ)			       \
 	$(HAIKU_OBJ) $(PGTK_OBJ) $(ANDROID_OBJ)
@@ -477,7 +479,7 @@ obj = $(doc_obj) $(HAIKU_CXX_OBJ)
 SOME_MACHINE_OBJECTS = dosfns.o msdos.o \
   xterm.o xfns.o xmenu.o xselect.o xrdb.o xsmfns.o fringe.o image.o \
   fontset.o dbusbind.o cygw32.o \
-  nsterm.o nsfns.o nsmenu.o nsselect.o nsimage.o nsfont.o macfont.o \
+  nsterm.o nsembed.o nsfns.o nsmenu.o nsselect.o nsimage.o nsfont.o macfont.o \
   nsxwidget.o \
   w32.o w32console.o w32cygwinx.o w32fns.o w32heap.o w32inevt.o w32notify.o \
   w32menu.o w32proc.o w32reg.o w32select.o w32term.o w32xfns.o \
