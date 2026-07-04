@@ -149,6 +149,7 @@ extern char etext;
 #include "treesit.h"
 
 #include "pdumper.h"
+#include "embemacs.h"
 #include "fingerprint.h"
 #include "epaths.h"
 
@@ -1316,9 +1317,11 @@ maybe_load_seccomp (int argc, char **argv)
 
 #endif  /* SECCOMP_USABLE */
 
+/* Embedding hosts call this directly; the standalone executable still
+   enters through main below.  */
 #if !defined HAVE_ANDROID || defined ANDROID_STUBIFY
 int
-main (int argc, char **argv)
+emacs_main (int argc, char **argv)
 #else
 int
 android_emacs_init (int argc, char **argv, char *dump_file)
@@ -2636,7 +2639,15 @@ Using an Emacs configured with --with-x-toolkit=lucid does not have this problem
   Frecursive_edit ();
   eassume (false);
 }
-
+
+#if !defined HAVE_ANDROID || defined ANDROID_STUBIFY
+int
+main (int argc, char **argv)
+{
+  return emacs_main (argc, argv);
+}
+#endif
+
 /* Sort the args so we can find the most important ones
    at the beginning of argv.  */
 
