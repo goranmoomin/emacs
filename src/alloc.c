@@ -48,6 +48,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "pdumper.h"
 #include "termhooks.h"		/* For struct terminal.  */
 #include "itree.h"
+#include "embfiber.h"
 #ifdef HAVE_WINDOW_SYSTEM
 #include TERM_HEADER
 #endif /* HAVE_WINDOW_SYSTEM */
@@ -1669,6 +1670,8 @@ allocate_string (void)
 {
   struct Lisp_String *s;
 
+  embfiber_check_stack ("Lisp allocation", "allocate_string");
+
   /* If the free-list is empty, allocate a new string_block, and
      add all the Lisp_Strings in it to the free-list.  */
   if (string_free_list == NULL)
@@ -2482,6 +2485,8 @@ make_float (double float_value)
 {
   register Lisp_Object val;
 
+  embfiber_check_stack ("Lisp allocation", "make_float");
+
   if (float_free_list)
     {
       XSETFLOAT (val, float_free_list);
@@ -2601,6 +2606,8 @@ DEFUN ("cons", Fcons, Scons, 2, 2, 0,
   (Lisp_Object car, Lisp_Object cdr)
 {
   register Lisp_Object val;
+
+  embfiber_check_stack ("Lisp allocation", "Fcons");
 
   if (cons_free_list)
     {
@@ -3352,6 +3359,8 @@ sweep_vectors (void)
 static struct Lisp_Vector *
 allocate_vectorlike (ptrdiff_t len, bool clearit)
 {
+  embfiber_check_stack ("Lisp allocation", "allocate_vectorlike");
+
   eassert (0 < len && len <= VECTOR_ELTS_MAX);
   ptrdiff_t nbytes = header_size + len * word_size;
   struct Lisp_Vector *p;
@@ -3680,6 +3689,7 @@ Its value is void, and its function definition and property list are nil.  */)
   Lisp_Object val;
 
   CHECK_STRING (name);
+  embfiber_check_stack ("Lisp allocation", "Fmake_symbol");
 
   if (symbol_free_list)
     {
@@ -5785,6 +5795,8 @@ garbage_collect (void)
   struct timespec start;
 
   eassert (weak_hash_tables == NULL);
+
+  embfiber_check_stack ("GC", NULL);
 
   if (garbage_collection_inhibited)
     return;

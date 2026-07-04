@@ -30,6 +30,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "buffer.h"
 #include "pdumper.h"
 #include "atimer.h"
+#include "embfiber.h"
 
 /* Non-nil means record all fset's and provide's, to be undone
    if the file being autoloaded is not fully loaded.
@@ -2565,6 +2566,8 @@ grow_specpdl_allocation (void)
 Lisp_Object
 eval_sub (Lisp_Object form)
 {
+  embfiber_check_stack ("Lisp entry", "eval_sub");
+
   if (SYMBOLP (form))
     {
       /* Look up its binding in the lexical environment.
@@ -3129,6 +3132,8 @@ For Lisp debugging see `debug', as well as `edebug', in the manual:
 Lisp_Object
 funcall_general (Lisp_Object fun, ptrdiff_t numargs, Lisp_Object *args)
 {
+  embfiber_check_stack ("Lisp entry", "funcall_general");
+
   Lisp_Object original_fun = fun;
  retry:
   if (SYMBOLP (fun) && !NILP (fun)
