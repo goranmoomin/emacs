@@ -36,6 +36,8 @@ GNUstep port and post-20 update by Adrian Robert (arobert@cogsci.ucsd.edu)
 #include "lisp.h"
 #include "blockinput.h"
 #include "nsterm.h"
+#include "nsembed.h"
+#include "embemacs.h"
 #include "window.h"
 #include "character.h"
 #include "buffer.h"
@@ -401,6 +403,9 @@ ns_set_icon_name (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
           }
     }
 
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns the embedded window title.  */
+
   /* Don't change the name if it's already NAME.  */
   if ([[view window] miniwindowTitle]
       && ([[[view window] miniwindowTitle]
@@ -416,6 +421,9 @@ ns_set_name_internal (struct frame *f, Lisp_Object name)
 {
   NSView *view = FRAME_NS_VIEW (f);
   NSString *str = [NSString stringWithLispString: name];
+
+  if (embemacs_frame_embedded_p (f))
+    return; /* The host owns the embedded window title.  */
 
   /* Don't change the name if it's already NAME.  */
   if (! [[[view window] title] isEqualToString: str])
@@ -479,6 +487,8 @@ ns_set_represented_filename (struct frame *f)
   NSTRACE ("ns_set_represented_filename");
 
   if (f->explicit_name || ! NILP (f->title))
+    return;
+  if (embemacs_frame_embedded_p (f))
     return;
 
   block_input ();
@@ -582,6 +592,7 @@ ns_set_doc_edited (void)
       NSView *view;
 
       if (! FRAME_NS_P (f)) continue;
+      if (embemacs_frame_embedded_p (f)) continue;
       w = XWINDOW (FRAME_SELECTED_WINDOW (f));
       view = FRAME_NS_VIEW (f);
       if (!MINI_WINDOW_P (w))
@@ -684,15 +695,16 @@ ns_change_tab_bar_height (struct frame *f, int height)
   SET_FRAME_GARBAGED (f);
 }
 
-#ifdef NS_IMPL_COCOA
-
 void
 ns_make_frame_key_window (struct frame *f)
 {
-  [[FRAME_NS_VIEW (f) window] makeKeyWindow];
-}
+  NSView *view = FRAME_NS_VIEW (f);
 
-#endif /* NS_IMPL_COCOA */
+  if (embemacs_frame_embedded_p (f))
+    [[view window] makeFirstResponder:view];
+  else
+    [[view window] makeKeyWindow];
+}
 
 /* tabbar support */
 static void
@@ -1501,7 +1513,8 @@ DEFUN ("x-create-frame", Fx_create_frame, Sx_create_frame,
 
 #ifdef NS_IMPL_COCOA
   /* If the app has previously been disabled, start it up again.  */
-  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
+  if (!embemacs_host_owns_app)
+    [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 #endif
 
   [[EmacsView alloc] initFrameFromEmacs: f];
@@ -1561,7 +1574,7 @@ DEFUN ("x-create-frame", Fx_create_frame, Sx_create_frame,
       else if (! NILP (visibility))
 	{
 	  ns_make_frame_visible (f);
-	  [[FRAME_NS_VIEW (f) window] makeKeyWindow];
+	  ns_make_frame_key_window (f);
 	}
       else
         {
@@ -1670,10 +1683,15 @@ Some window managers may refuse to restack windows.  */)
 
   if (FRAME_NS_VIEW (f1) && FRAME_NS_VIEW (f2))
     {
-      EmacsWindow *window = (EmacsWindow *)[FRAME_NS_VIEW (f1) window];
+      NSWindow *window = [FRAME_NS_VIEW (f1) window];
       NSWindow *window2 = [FRAME_NS_VIEW (f2) window];
 
-      if ([window restackWindow:window2 above:!NILP (above)])
+      if (embemacs_frame_embedded_p (f1) || embemacs_frame_embedded_p (f2))
+        error ("Cannot restack embedded frames");
+      if (![window isKindOfClass:[EmacsWindow class]])
+        error ("Cannot restack non-Emacs windows");
+
+      if ([(EmacsWindow *)window restackWindow:window2 above:!NILP (above)])
         return Qt;
       else
         return Qnil;
@@ -1855,7 +1873,7 @@ Optional arg DIR-ONLY-P, if non-nil, means choose only directories.  */)
                            timestamp: 0
                         windowNumber: [[NSApp mainWindow] windowNumber]
                              context: [NSApp context]
-                             subtype: 0
+                             subtype: NSAPP_SUBTYPE_EMACS
                                data1: 0
                                data2: NSAPP_DATA2_RUNFILEDIALOG];
 
@@ -1876,7 +1894,7 @@ Optional arg DIR-ONLY-P, if non-nil, means choose only directories.  */)
 	fname = DECODE_FILE (fname);
     }
 
-  [[FRAME_NS_VIEW (SELECTED_FRAME ()) window] makeKeyWindow];
+  ns_make_frame_key_window (SELECTED_FRAME ());
   unblock_input ();
 
   return fname;
@@ -2164,6 +2182,8 @@ DEFUN ("ns-hide-others", Fns_hide_others, Sns_hide_others,
      (void)
 {
   check_window_system (NULL);
+  if (embemacs_host_owns_app)
+    return Qnil; /* The host owns application hiding and activation.  */
   [NSApp hideOtherApplications: NSApp];
   return Qnil;
 }
@@ -2180,6 +2200,8 @@ is layered in front of the windows of other applications.  */)
   (Lisp_Object on)
 {
   check_window_system (NULL);
+  if (embemacs_host_owns_app)
+    return Qnil; /* The host owns application hiding and activation.  */
   if (EQ (on, Qactivate))
     {
       [NSApp unhide: NSApp];
@@ -2481,7 +2503,7 @@ In case the execution fails, an error is signaled.  */)
                            timestamp: 0
                         windowNumber: [[NSApp mainWindow] windowNumber]
                              context: [NSApp context]
-                             subtype: 0
+                             subtype: NSAPP_SUBTYPE_EMACS
                                data1: 0
                                data2: NSAPP_DATA2_RUNASSCRIPT];
 
