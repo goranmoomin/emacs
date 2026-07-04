@@ -384,20 +384,13 @@ typedef id instancetype;
 #ifdef NS_IMPL_GNUSTEP
   BOOL applicationDidFinishLaunchingCalled;
 #endif
-@public
-  int nextappdefined;
 }
 - (void)logNotification: (NSNotification *)notification;
 - (void)antialiasThresholdDidChange:(NSNotification *)notification;
 - (void)sendEvent: (NSEvent *)theEvent;
 - (void)showPreferencesWindow: (id)sender;
 - (BOOL) openFile: (NSString *)fileName;
-- (void)fd_handler: (id)unused;
-- (void)timeout_handler: (NSTimer *)timedEntry;
 - (BOOL)fulfillService: (NSString *)name withArg: (NSString *)arg;
-#ifdef NS_IMPL_GNUSTEP
-- (void)sendFromMainThread:(id)unused;
-#endif
 @end
 
 #ifdef NS_IMPL_GNUSTEP

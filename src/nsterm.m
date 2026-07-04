@@ -4996,6 +4996,25 @@ ns_draw_glyph_string (struct glyph_string *s)
    ========================================================================== */
 
 
+@interface EmacsRuntimeHelper : NSObject
+{
+@public
+  int nextappdefined;
+}
+- (void)fd_handler: (id)unused;
+- (void)timeout_handler: (NSTimer *)timedEntry;
+- (void)sendFromMainThread: (id)unused;
+@end
+
+static EmacsRuntimeHelper *emacs_runtime_helper;
+
+static EmacsRuntimeHelper *
+emacs_get_runtime_helper (void)
+{
+  eassert (emacs_runtime_helper != nil);
+  return emacs_runtime_helper;
+}
+
 static void
 ns_send_appdefined (int value)
 /* --------------------------------------------------------------------------
@@ -5009,11 +5028,15 @@ ns_send_appdefined (int value)
   // Cocoa needs nextEventMatchingMask to happen on the main thread too.
   if (! [[NSThread currentThread] isMainThread])
     {
-      EmacsApp *app = (EmacsApp *)NSApp;
-      app->nextappdefined = value;
-      [app performSelectorOnMainThread:@selector (sendFromMainThread:)
-                            withObject:nil
-                         waitUntilDone:NO];
+      EmacsRuntimeHelper *helper = emacs_get_runtime_helper ();
+      /* This write races with sendFromMainThread:'s read, as it did when
+         EmacsApp owned this field.  The race is benign: any posted
+         application-defined event wakes the main thread, and the newest
+         value is sufficient.  */
+      helper->nextappdefined = value;
+      [helper performSelectorOnMainThread:@selector (sendFromMainThread:)
+                               withObject:nil
+                            waitUntilDone:NO];
       return;
     }
 
@@ -5051,6 +5074,118 @@ ns_send_appdefined (int value)
       [NSApp postEvent: nxev atStart: NO];
     }
 }
+
+static _Noreturn void
+ns_fd_handler_common (void)
+/* --------------------------------------------------------------------------
+     Check data waiting on file descriptors and terminate if so.
+   -------------------------------------------------------------------------- */
+{
+  int result;
+  int waiting = 1, nfds;
+  char c;
+
+  fd_set readfds, writefds, *wfds;
+  struct timespec timeout, *tmo;
+  NSAutoreleasePool *pool = nil;
+
+  /* NSTRACE ("fd_handler"); */
+
+  for (;;)
+    {
+      [pool release];
+      pool = [[NSAutoreleasePool alloc] init];
+
+      if (waiting)
+        {
+          fd_set fds;
+          FD_ZERO (&fds);
+          FD_SET (selfds[0], &fds);
+          result = pselect (selfds[0]+1, &fds, NULL, NULL, NULL, NULL);
+          if (result > 0 && read (selfds[0], &c, 1) == 1 && c == 'g')
+	    waiting = 0;
+        }
+      else
+        {
+          pthread_mutex_lock (&select_mutex);
+          nfds = select_nfds;
+
+          if (select_valid & SELECT_HAVE_READ)
+            readfds = select_readfds;
+          else
+            FD_ZERO (&readfds);
+
+          if (select_valid & SELECT_HAVE_WRITE)
+            {
+              writefds = select_writefds;
+              wfds = &writefds;
+            }
+          else
+            wfds = NULL;
+          if (select_valid & SELECT_HAVE_TMO)
+            {
+              timeout = select_timeout;
+              tmo = &timeout;
+            }
+          else
+            tmo = NULL;
+
+          pthread_mutex_unlock (&select_mutex);
+
+          FD_SET (selfds[0], &readfds);
+          if (selfds[0] >= nfds) nfds = selfds[0]+1;
+
+          result = pselect (nfds, &readfds, wfds, NULL, tmo, NULL);
+
+          if (result == 0)
+            ns_send_appdefined (-2);
+          else if (result > 0)
+            {
+              if (FD_ISSET (selfds[0], &readfds))
+                {
+                  if (read (selfds[0], &c, 1) == 1 && c == 's')
+		    waiting = 1;
+                }
+              else
+                {
+                  pthread_mutex_lock (&select_mutex);
+                  if (select_valid & SELECT_HAVE_READ)
+                    select_readfds = readfds;
+                  if (select_valid & SELECT_HAVE_WRITE)
+                    select_writefds = writefds;
+                  if (select_valid & SELECT_HAVE_TMO)
+                    select_timeout = timeout;
+                  pthread_mutex_unlock (&select_mutex);
+
+                  ns_send_appdefined (result);
+                }
+            }
+          waiting = 1;
+        }
+    }
+}
+
+@implementation EmacsRuntimeHelper
+
+- (void)timeout_handler: (NSTimer *)timedEntry
+{
+  (void)timedEntry;
+  ns_send_appdefined (-2);
+}
+
+- (void)sendFromMainThread: (id)unused
+{
+  (void)unused;
+  ns_send_appdefined (nextappdefined);
+}
+
+- (void)fd_handler: (id)unused
+{
+  (void)unused;
+  ns_fd_handler_common ();
+}
+
+@end
 
 #if defined (NS_IMPL_COCOA) && MAC_OS_X_VERSION_MAX_ALLOWED >= 1070
 static void
@@ -5268,7 +5403,7 @@ ns_select_1 (int nfds, fd_set *readfds, fd_set *writefds,
       /* No file descriptor, just a timeout, no need to wake fd_handler.  */
       double time = timespectod (*timeout);
       timed_entry = [[NSTimer scheduledTimerWithTimeInterval: time
-                                                      target: NSApp
+                                                      target: emacs_get_runtime_helper ()
                                                     selector:
                                   @selector (timeout_handler:)
                                                     userInfo: 0
@@ -5993,10 +6128,11 @@ ns_term_init (Lisp_Object display_name)
   if (NSApp == nil)
     return NULL;
   [NSApp setDelegate: NSApp];
+  emacs_runtime_helper = [[EmacsRuntimeHelper alloc] init];
 
   /* Start the select thread.  */
   [NSThread detachNewThreadSelector:@selector (fd_handler:)
-                           toTarget:NSApp
+                           toTarget:emacs_get_runtime_helper ()
                          withObject:nil];
 
   /* debugging: log all notifications */
@@ -6722,118 +6858,6 @@ not_in_argv (NSString *arg)
 
   // ns_app_active=NO;
   ns_send_appdefined (-1);
-}
-
-
-
-/* ==========================================================================
-
-    EmacsApp aux handlers for managing event loop
-
-   ========================================================================== */
-
-
-- (void)timeout_handler: (NSTimer *)timedEntry
-/* --------------------------------------------------------------------------
-     The timeout specified to ns_select has passed.
-   -------------------------------------------------------------------------- */
-{
-  /* NSTRACE ("timeout_handler"); */
-  ns_send_appdefined (-2);
-}
-
-- (void)sendFromMainThread:(id)unused
-{
-  ns_send_appdefined (nextappdefined);
-}
-
-- (void)fd_handler:(id)unused
-/* --------------------------------------------------------------------------
-     Check data waiting on file descriptors and terminate if so.
-   -------------------------------------------------------------------------- */
-{
-  int result;
-  int waiting = 1, nfds;
-  char c;
-
-  fd_set readfds, writefds, *wfds;
-  struct timespec timeout, *tmo;
-  NSAutoreleasePool *pool = nil;
-
-  /* NSTRACE ("fd_handler"); */
-
-  for (;;)
-    {
-      [pool release];
-      pool = [[NSAutoreleasePool alloc] init];
-
-      if (waiting)
-        {
-          fd_set fds;
-          FD_ZERO (&fds);
-          FD_SET (selfds[0], &fds);
-          result = pselect (selfds[0]+1, &fds, NULL, NULL, NULL, NULL);
-          if (result > 0 && read (selfds[0], &c, 1) == 1 && c == 'g')
-	    waiting = 0;
-        }
-      else
-        {
-          pthread_mutex_lock (&select_mutex);
-          nfds = select_nfds;
-
-          if (select_valid & SELECT_HAVE_READ)
-            readfds = select_readfds;
-          else
-            FD_ZERO (&readfds);
-
-          if (select_valid & SELECT_HAVE_WRITE)
-            {
-              writefds = select_writefds;
-              wfds = &writefds;
-            }
-          else
-            wfds = NULL;
-          if (select_valid & SELECT_HAVE_TMO)
-            {
-              timeout = select_timeout;
-              tmo = &timeout;
-            }
-          else
-            tmo = NULL;
-
-          pthread_mutex_unlock (&select_mutex);
-
-          FD_SET (selfds[0], &readfds);
-          if (selfds[0] >= nfds) nfds = selfds[0]+1;
-
-          result = pselect (nfds, &readfds, wfds, NULL, tmo, NULL);
-
-          if (result == 0)
-            ns_send_appdefined (-2);
-          else if (result > 0)
-            {
-              if (FD_ISSET (selfds[0], &readfds))
-                {
-                  if (read (selfds[0], &c, 1) == 1 && c == 's')
-		    waiting = 1;
-                }
-              else
-                {
-                  pthread_mutex_lock (&select_mutex);
-                  if (select_valid & SELECT_HAVE_READ)
-                    select_readfds = readfds;
-                  if (select_valid & SELECT_HAVE_WRITE)
-                    select_writefds = writefds;
-                  if (select_valid & SELECT_HAVE_TMO)
-                    select_timeout = timeout;
-                  pthread_mutex_unlock (&select_mutex);
-
-                  ns_send_appdefined (result);
-                }
-            }
-          waiting = 1;
-        }
-    }
 }
 
 
