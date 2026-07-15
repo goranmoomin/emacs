@@ -44,6 +44,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "atimer.h"
 #include "process.h"
 #include "menu.h"
+#include "embemacs.h"
 
 #ifdef HAVE_TEXT_CONVERSION
 #include "textconv.h"
@@ -4759,6 +4760,9 @@ decode_timer (Lisp_Object timer)
 static struct timespec
 timer_check_2 (Lisp_Object timers, Lisp_Object idle_timers)
 {
+  /* Run expressions queued by an embedding host.  */
+  embemacs_run_pending_evals ();
+
   /* First run the code that was delayed.  */
   while (CONSP (pending_funcalls))
     {

@@ -23,6 +23,9 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "embfiber.h"
 #include "nsembed.h"
 
+#include "lisp.h"
+#include "coding.h"
+
 bool embemacs_host_owns_app;
 
 #include <stdio.h>
@@ -61,6 +64,164 @@ embemacs_free_start_args (struct embemacs_start_args *args)
         free (args->argv[i]);
       free (args->argv);
       free (args);
+    }
+}
+
+/* --- Host-queued async evaluation ---------------------------------------
+
+   The host enqueues UTF-8 expression strings on the main thread and
+   wakes a parked fiber with an appdefined event; the command loop's
+   timer check drains the queue on the fiber (embemacs_run_pending_evals,
+   called from timer_check_2 in keyboard.c next to pending_funcalls).
+   Host and fiber strictly alternate on the main thread, so the queue
+   needs no locking.  */
+
+struct embemacs_eval_request
+{
+  char *lisp;
+  embemacs_eval_callback callback;
+  void *context;
+  struct embemacs_eval_request *next;
+};
+
+static struct embemacs_eval_request *embemacs_eval_head;
+static struct embemacs_eval_request *embemacs_eval_tail;
+
+/* Declared in nsterm.h, which is not includable from C here.  */
+extern void ns_send_appdefined (int value);
+
+static int
+embemacs_eval_enqueue (const char *lisp, embemacs_eval_callback callback,
+                       void *context)
+{
+  struct embemacs_eval_request *req;
+
+  if (!pthread_main_np ())
+    return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
+                                "embemacs_eval_async must be called on the main thread");
+  if (!embfiber_launched_p () || embfiber_finished_p ())
+    return embemacs_start_fail (EMBEMACS_ERR_NOT_RUNNING,
+                                "embemacs_eval_async requires a running embedded Emacs");
+  if (lisp == NULL)
+    return embemacs_start_fail (EMBEMACS_ERR_INVALID_ARGUMENT,
+                                "embemacs_eval_async called with a null expression");
+
+  req = malloc (sizeof *req);
+  if (req == NULL)
+    return embemacs_start_fail (EMBEMACS_ERR_NO_MEMORY,
+                                "embemacs_eval_async could not allocate a request");
+  req->lisp = strdup (lisp);
+  if (req->lisp == NULL)
+    {
+      free (req);
+      return embemacs_start_fail (EMBEMACS_ERR_NO_MEMORY,
+                                  "embemacs_eval_async could not copy the expression");
+    }
+  req->callback = callback;
+  req->context = context;
+  req->next = NULL;
+
+  if (embemacs_eval_tail != NULL)
+    embemacs_eval_tail->next = req;
+  else
+    embemacs_eval_head = req;
+  embemacs_eval_tail = req;
+
+  /* Wake a parked fiber so the command loop reaches its next timer
+     check promptly.  */
+  ns_send_appdefined (-1);
+  return EMBEMACS_OK;
+}
+
+int
+embemacs_eval_async (const char *lisp)
+{
+  return embemacs_eval_enqueue (lisp, NULL, NULL);
+}
+
+int
+embemacs_eval_async_with_result (const char *lisp,
+                                 embemacs_eval_callback callback,
+                                 void *context)
+{
+  if (callback == NULL)
+    return embemacs_start_fail (EMBEMACS_ERR_INVALID_ARGUMENT,
+                                "embemacs_eval_async_with_result called with a null callback");
+  return embemacs_eval_enqueue (lisp, callback, context);
+}
+
+/* Set by embemacs_eval_on_error while one request runs; single-threaded
+   by the strict host/fiber alternation.  */
+static bool embemacs_eval_failed;
+
+/* Read and eval REQ->lisp; return its prin1 form when a callback wants
+   the result.  Runs under internal_catch_all.  */
+static Lisp_Object
+embemacs_eval_body (void *ptr)
+{
+  struct embemacs_eval_request *req = ptr;
+  Lisp_Object form
+    = Fcar (Fread_from_string (build_string (req->lisp), Qnil, Qnil));
+  Lisp_Object value = Feval (form, Qt);
+
+  if (req->callback == NULL)
+    return Qnil;
+  return Fprin1_to_string (value, Qnil, Qnil);
+}
+
+static Lisp_Object
+embemacs_eval_on_error (enum nonlocal_exit exit, Lisp_Object error)
+{
+  embemacs_eval_failed = true;
+  if (exit == NONLOCAL_EXIT_SIGNAL)
+    return Ferror_message_string (error);
+  return Fprin1_to_string (Fcons (build_string ("throw"), error), Qnil, Qnil);
+}
+
+static void
+embemacs_run_one_eval (struct embemacs_eval_request *req)
+{
+  Lisp_Object printed;
+
+  embemacs_eval_failed = false;
+  printed = internal_catch_all (embemacs_eval_body, req,
+                                embemacs_eval_on_error);
+
+  if (req->callback != NULL)
+    {
+      Lisp_Object encoded = (STRINGP (printed) ? ENCODE_UTF_8 (printed)
+                             : build_string ("nil"));
+      req->callback (!embemacs_eval_failed, SSDATA (encoded), req->context);
+    }
+  else if (embemacs_eval_failed)
+    {
+      Lisp_Object encoded = (STRINGP (printed) ? ENCODE_UTF_8 (printed)
+                             : build_string ("unknown error"));
+      fprintf (stderr, "embemacs: eval error: %s\n", SSDATA (encoded));
+    }
+}
+
+void
+embemacs_run_pending_evals (void)
+{
+  struct embemacs_eval_request *req;
+
+  if (embemacs_eval_head == NULL)
+    return;
+
+  /* Snapshot the queue: requests enqueued by result callbacks run at
+     the next timer check, after a fresh wakeup.  */
+  req = embemacs_eval_head;
+  embemacs_eval_head = NULL;
+  embemacs_eval_tail = NULL;
+
+  while (req != NULL)
+    {
+      struct embemacs_eval_request *next = req->next;
+      embemacs_run_one_eval (req);
+      free (req->lisp);
+      free (req);
+      req = next;
     }
 }
 
@@ -172,6 +333,31 @@ embemacs_start (int argc, char **argv)
                               "embemacs_start requires the Cocoa NS port");
 }
 
+int
+embemacs_eval_async (const char *lisp)
+{
+  (void) lisp;
+  return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                              "embemacs_eval_async requires the Cocoa NS port");
+}
+
+int
+embemacs_eval_async_with_result (const char *lisp,
+                                 embemacs_eval_callback callback,
+                                 void *context)
+{
+  (void) lisp;
+  (void) callback;
+  (void) context;
+  return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                              "embemacs_eval_async requires the Cocoa NS port");
+}
+
+void
+embemacs_run_pending_evals (void)
+{
+}
+
 #else
 
 void
@@ -187,6 +373,31 @@ embemacs_start (int argc, char **argv)
   (void) argv;
   fprintf (stderr, "embemacs: embemacs_start requires the NS port\n");
   return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+int
+embemacs_eval_async (const char *lisp)
+{
+  (void) lisp;
+  fprintf (stderr, "embemacs: embemacs_eval_async requires the NS port\n");
+  return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+int
+embemacs_eval_async_with_result (const char *lisp,
+                                 embemacs_eval_callback callback,
+                                 void *context)
+{
+  (void) lisp;
+  (void) callback;
+  (void) context;
+  fprintf (stderr, "embemacs: embemacs_eval_async requires the NS port\n");
+  return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+void
+embemacs_run_pending_evals (void)
+{
 }
 
 #endif

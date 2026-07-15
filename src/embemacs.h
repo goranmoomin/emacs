@@ -69,7 +69,8 @@ enum embemacs_start_result
   EMBEMACS_ERR_STACK_ALLOC = -4,
   EMBEMACS_ERR_UNSUPPORTED = -5,
   EMBEMACS_ERR_INVALID_ARGUMENT = -6,
-  EMBEMACS_ERR_NO_MEMORY = -7
+  EMBEMACS_ERR_NO_MEMORY = -7,
+  EMBEMACS_ERR_NOT_RUNNING = -8
 };
 
 /* Fiber-mode entry: start Emacs on its own stack (a fiber) on the main
@@ -89,6 +90,38 @@ enum embemacs_start_result
    precondition/platform/resource failure.  Emacs terminates via process
    exit.  */
 extern int embemacs_start (int argc, char **argv);
+
+/* Result callback for embemacs_eval_async_with_result.  Called on the
+   main thread, on the Emacs fiber stack, once the queued expression has
+   been evaluated.  SUCCESS is false when evaluation signaled an error or
+   threw; RESULT is the value printed with prin1 (or the error
+   description), UTF-8 encoded, valid only for the duration of the call.
+   The callback must return promptly, must not block, and must not call
+   Lisp; it may queue further embemacs_eval_async* requests.  */
+typedef void (*embemacs_eval_callback) (bool success, const char *result,
+                                        void *context);
+
+/* Queue LISP, one Lisp expression in UTF-8 string form (wrap several
+   forms in progn), for evaluation on the Emacs fiber.  The expression
+   runs at the command loop's next timer check, with timer-function
+   semantics: promptly when Emacs is idle, and after the current command
+   or blocking call otherwise.  Evaluation errors are caught and logged
+   to stderr.  Main thread only; requires a started, still-running
+   embedded Emacs.  Returns EMBEMACS_OK when queued, else a negative
+   embemacs_start_result code (EMBEMACS_ERR_WRONG_THREAD,
+   EMBEMACS_ERR_NOT_RUNNING, EMBEMACS_ERR_INVALID_ARGUMENT,
+   EMBEMACS_ERR_NO_MEMORY, EMBEMACS_ERR_UNSUPPORTED).  */
+extern int embemacs_eval_async (const char *lisp);
+
+/* As embemacs_eval_async, but deliver the printed result or error
+   description to CALLBACK with CONTEXT.  */
+extern int embemacs_eval_async_with_result (const char *lisp,
+                                            embemacs_eval_callback callback,
+                                            void *context);
+
+/* Internal: run queued eval requests on the fiber.  Called from the
+   command loop's timer check; not part of the host API.  */
+extern void embemacs_run_pending_evals (void);
 
 #ifdef __cplusplus
 }
