@@ -98,6 +98,7 @@ static void *embfiber_service_arg;
 static void *embfiber_service_result;
 static bool embfiber_service_pending;
 static bool embfiber_service_blocked_logged;
+static bool embfiber_service_after_exit_logged;
 
 static void embfiber_trampoline (void) __attribute__ ((noreturn));
 
@@ -295,6 +296,19 @@ embfiber_call_on (void *(*fn) (void *), void *arg)
   if (!embfiber_active || embfiber_on_fiber)
     return fn (arg);
 
+  /* AppKit keeps calling back (redraws, notifications) after Emacs has
+     exited; the defunct fiber cannot serve them.  */
+  if (embfiber_done)
+    {
+      if (!embfiber_service_after_exit_logged)
+        {
+          fputs ("embemacs: service call after fiber exit; result unavailable\n",
+                 stderr);
+          embfiber_service_after_exit_logged = true;
+        }
+      return NULL;
+    }
+
   if (embfiber_service_fn != NULL)
     embfiber_die ("nested service call while a previous service is blocked on the fiber");
 
@@ -424,6 +438,12 @@ main (void)
   if (strcmp (embfiber_test_events, "0ADR1B2S3T4C5") != 0)
     abort ();
   if (embfiber_resume ())
+    abort ();
+
+  /* Service calls after the fiber has finished return NULL.  */
+  if (embfiber_call_on (embfiber_test_roundtrip_service,
+                        &embfiber_test_token)
+      != NULL)
     abort ();
 
   puts ("PASS");

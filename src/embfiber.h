@@ -90,7 +90,9 @@ extern bool embfiber_resume (void);
    Service calls are only coherent while the fiber is parked and the service
    body does not itself block.  If a service body parks the fiber, this
    function returns NULL to the host and the service continues later on the
-   fiber; callers that need a value must treat NULL/zero as unavailable.  */
+   fiber; callers that need a value must treat NULL/zero as unavailable.
+   After the fiber has finished (entry returned or embfiber_exit), service
+   calls from the host return NULL without running FN.  */
 extern void *embfiber_call_on (void *(*fn) (void *), void *arg);
 
 /* Terminate the fiber: mark it finished and switch back to the host
