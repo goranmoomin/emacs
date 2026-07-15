@@ -119,9 +119,56 @@ extern int embemacs_eval_async_with_result (const char *lisp,
                                             embemacs_eval_callback callback,
                                             void *context);
 
-/* Internal: run queued eval requests on the fiber.  Called from the
-   command loop's timer check; not part of the host API.  */
+/* Host notification callbacks.  All of them run on the main thread, on
+   the Emacs fiber stack; they must return promptly, must not block, and
+   must not call Lisp.  They may queue embemacs_eval_async* requests.
+   The setters are main thread only, may be called before or after
+   embemacs_start, and a NULL callback clears the notification.  They
+   return EMBEMACS_OK or a negative embemacs_start_result code.  */
+
+/* Called once, at the first command-loop timer check after Emacs
+   startup has completed (`after-init-time' is set): init files and
+   startup argv have been processed and Emacs is ready for
+   embemacs_eval_async requests and input.  */
+typedef void (*embemacs_ready_callback) (void *context);
+extern int embemacs_set_ready_callback (embemacs_ready_callback callback,
+                                        void *context);
+
+/* Called when the embedded frame's title or name changes.  Emacs never
+   retitles the host window itself (the host owns it); this reports what
+   the title would have been.  TITLE is UTF-8 and valid only for the
+   duration of the call.  */
+typedef void (*embemacs_title_callback) (const char *title, void *context);
+extern int embemacs_set_title_callback (embemacs_title_callback callback,
+                                        void *context);
+
+/* Called when Emacs exits (kill-emacs), as its final act on the fiber,
+   after kill-emacs-hook, auto-save, and subprocess shutdown have run.
+   When this callback is set, kill-emacs does NOT exit the process:
+   after the callback returns, the fiber is terminated permanently and
+   control returns to the host run loop; further embemacs_eval_async
+   calls fail with EMBEMACS_ERR_NOT_RUNNING, and the embedded view is
+   defunct.  A typical host records EXIT_CODE and defers app termination
+   or view teardown with dispatch_async.  Without this callback,
+   kill-emacs calls exit() as before.  Restarting Emacs in the same
+   process is not supported.  */
+typedef void (*embemacs_exit_callback) (int exit_code, void *context);
+extern int embemacs_set_exit_callback (embemacs_exit_callback callback,
+                                       void *context);
+
+/* Internal: run queued eval requests (and fire the ready notification)
+   on the fiber.  Called from the command loop's timer check; not part
+   of the host API.  */
 extern void embemacs_run_pending_evals (void);
+
+/* Internal: notify the host of an embedded-frame title change.  Fiber
+   only; TITLE is UTF-8.  */
+extern void embemacs_notify_title (const char *title);
+
+/* Internal: in fiber mode with an exit callback set, notify the host
+   and terminate the fiber instead of exiting the process; otherwise
+   return so the caller can exit().  Called by kill-emacs.  */
+extern void embemacs_handle_exit (int exit_code);
 
 #ifdef __cplusplus
 }

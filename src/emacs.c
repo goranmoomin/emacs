@@ -3096,6 +3096,11 @@ killed.  */
 		 : XFIXNUM (arg) & INT_MAX);
   else
     exit_code = EXIT_SUCCESS;
+
+  /* In fiber mode with a host exit callback, this notifies the host and
+     terminates the fiber instead of returning.  */
+  embemacs_handle_exit (exit_code);
+
   exit (exit_code);
 }
 

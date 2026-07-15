@@ -247,6 +247,19 @@ embfiber_park (void)
     }
 }
 
+void
+embfiber_exit (void)
+{
+  if (!embfiber_on_fiber)
+    embfiber_die ("exit called while not on fiber");
+
+  embfiber_done = true;
+  embfiber_set_on_fiber (false);
+
+  for (;;)
+    embfiber_switch (&embfiber_fiber_sp, embfiber_host_sp);
+}
+
 bool
 embfiber_resume (void)
 {

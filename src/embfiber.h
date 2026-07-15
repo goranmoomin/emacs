@@ -93,6 +93,11 @@ extern bool embfiber_resume (void);
    fiber; callers that need a value must treat NULL/zero as unavailable.  */
 extern void *embfiber_call_on (void *(*fn) (void *), void *arg);
 
+/* Terminate the fiber: mark it finished and switch back to the host
+   stack permanently.  Later resumes do nothing and return false.  The
+   fiber stack is not unwound or reclaimed.  Fiber only; never returns.  */
+extern void embfiber_exit (void) __attribute__ ((noreturn));
+
 /* True once a fiber has been launched.  */
 extern bool embfiber_launched_p (void);
 

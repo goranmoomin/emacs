@@ -6493,7 +6493,13 @@ ns_term_shutdown (int sig)
     unlink (SSDATA (Vauto_save_list_file_name));
 
   if (sig == 0 || sig == SIGTERM)
-    [NSApp terminate: NSApp];
+    {
+      /* In host-owned-app mode the host controls app termination;
+         return so kill-emacs can notify the host (embemacs_handle_exit)
+         or exit with its real exit code.  */
+      if (!embemacs_host_owns_app)
+        [NSApp terminate: NSApp];
+    }
   else /* Force a stack trace to happen.  */
     emacs_abort ();
 }

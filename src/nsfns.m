@@ -423,7 +423,12 @@ ns_set_name_internal (struct frame *f, Lisp_Object name)
   NSString *str = [NSString stringWithLispString: name];
 
   if (embemacs_frame_embedded_p (f))
-    return; /* The host owns the embedded window title.  */
+    {
+      /* The host owns the embedded window title; report the change
+         instead of retitling.  */
+      embemacs_notify_title ([str UTF8String]);
+      return;
+    }
 
   /* Don't change the name if it's already NAME.  */
   if (! [[[view window] title] isEqualToString: str])

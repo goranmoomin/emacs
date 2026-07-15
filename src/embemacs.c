@@ -67,6 +67,90 @@ embemacs_free_start_args (struct embemacs_start_args *args)
     }
 }
 
+/* --- Host notification callbacks -----------------------------------------
+
+   Registered on the main thread, invoked on the fiber stack (still the
+   main thread) at Lisp-safe points, so no locking is needed.  */
+
+static embemacs_ready_callback embemacs_ready_cb;
+static void *embemacs_ready_ctx;
+static bool embemacs_ready_fired;
+static embemacs_title_callback embemacs_title_cb;
+static void *embemacs_title_ctx;
+static embemacs_exit_callback embemacs_exit_cb;
+static void *embemacs_exit_ctx;
+
+int
+embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
+{
+  if (!pthread_main_np ())
+    return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
+                                "embemacs_set_ready_callback must be called on the main thread");
+  embemacs_ready_cb = callback;
+  embemacs_ready_ctx = context;
+  return EMBEMACS_OK;
+}
+
+int
+embemacs_set_title_callback (embemacs_title_callback callback, void *context)
+{
+  if (!pthread_main_np ())
+    return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
+                                "embemacs_set_title_callback must be called on the main thread");
+  embemacs_title_cb = callback;
+  embemacs_title_ctx = context;
+  return EMBEMACS_OK;
+}
+
+int
+embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
+{
+  if (!pthread_main_np ())
+    return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
+                                "embemacs_set_exit_callback must be called on the main thread");
+  embemacs_exit_cb = callback;
+  embemacs_exit_ctx = context;
+  return EMBEMACS_OK;
+}
+
+/* Fire the ready notification once startup is complete.  Fiber only
+   (called from the command loop's timer check); `after-init-time' is
+   the same signal startup.el exposes to Lisp.  */
+static void
+embemacs_maybe_notify_ready (void)
+{
+  Lisp_Object sym;
+
+  if (embemacs_ready_cb == NULL || embemacs_ready_fired || !embfiber_active)
+    return;
+
+  sym = intern ("after-init-time");
+  if (NILP (Fboundp (sym)) || NILP (Fsymbol_value (sym)))
+    return;
+
+  embemacs_ready_fired = true;
+  embemacs_ready_cb (embemacs_ready_ctx);
+}
+
+void
+embemacs_notify_title (const char *title)
+{
+  if (embemacs_title_cb != NULL && title != NULL)
+    embemacs_title_cb (title, embemacs_title_ctx);
+}
+
+void
+embemacs_handle_exit (int exit_code)
+{
+  embemacs_exit_callback callback = embemacs_exit_cb;
+
+  if (!embfiber_active || !embfiber_on_fiber || callback == NULL)
+    return;
+
+  callback (exit_code, embemacs_exit_ctx);
+  embfiber_exit ();
+}
+
 /* --- Host-queued async evaluation ---------------------------------------
 
    The host enqueues UTF-8 expression strings on the main thread and
@@ -206,6 +290,8 @@ embemacs_run_pending_evals (void)
 {
   struct embemacs_eval_request *req;
 
+  embemacs_maybe_notify_ready ();
+
   if (embemacs_eval_head == NULL)
     return;
 
@@ -306,6 +392,9 @@ embemacs_start (int argc, char **argv)
       return embemacs_start_fail (EMBEMACS_ERR_STACK_ALLOC,
                                   "embemacs_start could not allocate the fiber stack");
     }
+  if (embfiber_finished_p ())
+    return embemacs_start_fail (EMBEMACS_ERR_NOT_RUNNING,
+                                "Emacs exited during startup");
   return EMBEMACS_OK;
 }
 
@@ -358,6 +447,45 @@ embemacs_run_pending_evals (void)
 {
 }
 
+int
+embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                              "embemacs callbacks require the Cocoa NS port");
+}
+
+int
+embemacs_set_title_callback (embemacs_title_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                              "embemacs callbacks require the Cocoa NS port");
+}
+
+int
+embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                              "embemacs callbacks require the Cocoa NS port");
+}
+
+void
+embemacs_notify_title (const char *title)
+{
+  (void) title;
+}
+
+void
+embemacs_handle_exit (int exit_code)
+{
+  (void) exit_code;
+}
+
 #else
 
 void
@@ -398,6 +526,45 @@ embemacs_eval_async_with_result (const char *lisp,
 void
 embemacs_run_pending_evals (void)
 {
+}
+
+int
+embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
+  return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+int
+embemacs_set_title_callback (embemacs_title_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
+  return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+int
+embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
+{
+  (void) callback;
+  (void) context;
+  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
+  return EMBEMACS_ERR_UNSUPPORTED;
+}
+
+void
+embemacs_notify_title (const char *title)
+{
+  (void) title;
+}
+
+void
+embemacs_handle_exit (int exit_code)
+{
+  (void) exit_code;
 }
 
 #endif
