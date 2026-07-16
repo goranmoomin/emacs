@@ -335,9 +335,15 @@ extern bool in_current_thread (void);
 typedef int select_func (int, fd_set *, fd_set *, fd_set *,
 			 const struct timespec *, const sigset_t *);
 
-int thread_select  (select_func *func, int max_fds, fd_set *rfds,
-		    fd_set *wfds, fd_set *efds, struct timespec *timeout,
-		    sigset_t *sigmask);
+int thread_select (select_func *func, int max_fds, fd_set *rfds,
+                   fd_set *wfds, fd_set *efds, struct timespec *timeout,
+                   sigset_t *sigmask);
+/* As thread_select, but do not release xg_select's GLib-context lock after
+   FUNC returns.  Use only for waits that did not acquire that lock.  */
+int thread_select_no_select_lock (select_func *func, int max_fds,
+                                  fd_set *rfds, fd_set *wfds, fd_set *efds,
+                                  struct timespec *timeout,
+                                  sigset_t *sigmask);
 
 bool thread_check_current_buffer (struct buffer *);
 

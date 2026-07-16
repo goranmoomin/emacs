@@ -5542,10 +5542,10 @@ wait_reading_process_output (intmax_t time_limit, int nsecs, int read_kbd,
 	    FD_CLR (fd, &Atemp);
 
 	  timeout = make_timespec (0, 0);
-	  if ((thread_select (pselect, max_desc + 1,
-			      &Atemp,
-			      (num_pending_connects > 0 ? &Ctemp : NULL),
-			      NULL, &timeout, NULL)
+	  if ((thread_select_no_select_lock
+               (pselect, max_desc + 1, &Atemp,
+                (num_pending_connects > 0 ? &Ctemp : NULL),
+                NULL, &timeout, NULL)
 	       <= 0))
 	    {
 	      /* It's okay for us to do this and then continue with
@@ -5786,10 +5786,11 @@ wait_reading_process_output (intmax_t time_limit, int nsecs, int read_kbd,
 				 &Available, (check_write ? &Writeok : 0),
 				 NULL, &timeout);
 #else /* THREADS_ENABLED */
-	  nfds = thread_select (android_select_wrapper,
-				max_desc + 1,
-				&Available, (check_write ? &Writeok : 0),
-				NULL, &timeout, NULL);
+	  nfds = thread_select_no_select_lock (android_select_wrapper,
+					 max_desc + 1,
+					 &Available,
+					 (check_write ? &Writeok : 0),
+					 NULL, &timeout, NULL);
 #endif /* THREADS_ENABLED */
 #else
 

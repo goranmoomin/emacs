@@ -37,7 +37,6 @@ extern bool pgtkembed_frame_p (struct frame *f);
 
 /* PGTK fiber backend used by embemacs.c and xgselect.c.  */
 extern bool pgtkembed_ui_thread_p (void);
-extern bool pgtkembed_parent_widget_set_p (void);
 extern bool pgtk_embfiber_install_driver (void);
 extern int pgtk_embfiber_select (int, fd_set *, fd_set *, fd_set *,
                                  const struct timespec *, const sigset_t *);

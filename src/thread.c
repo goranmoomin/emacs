@@ -606,6 +606,7 @@ struct select_args
   fd_set *efds;
   struct timespec *timeout;
   sigset_t *sigmask;
+  bool release_select_lock_p;
   int result;
 };
 
@@ -624,7 +625,8 @@ really_call_select (void *arg)
   sa->result = (sa->func) (sa->max_fds, sa->rfds, sa->wfds, sa->efds,
 			   sa->timeout, sa->sigmask);
 
-  release_select_lock ();
+  if (sa->release_select_lock_p)
+    release_select_lock ();
 
   block_interrupt_signal (&oldset);
   /* If we were interrupted by C-g while inside sa->func above, the
@@ -639,10 +641,10 @@ really_call_select (void *arg)
   restore_signal_mask (&oldset);
 }
 
-int
-thread_select (select_func *func, int max_fds, fd_set *rfds,
-	       fd_set *wfds, fd_set *efds, struct timespec *timeout,
-	       sigset_t *sigmask)
+static int
+thread_select_1 (select_func *func, int max_fds, fd_set *rfds,
+                 fd_set *wfds, fd_set *efds, struct timespec *timeout,
+                 sigset_t *sigmask, bool release_select_lock_p)
 {
   struct select_args sa;
 
@@ -653,11 +655,30 @@ thread_select (select_func *func, int max_fds, fd_set *rfds,
   sa.efds = efds;
   sa.timeout = timeout;
   sa.sigmask = sigmask;
+  sa.release_select_lock_p = release_select_lock_p;
 #if defined HAVE_ANDROID && !defined ANDROID_STUBIFY
   android_before_select ();
 #endif /* HAVE_ANDROID && !defined ANDROID_STUBIFY */
   flush_stack_call_func (really_call_select, &sa);
   return sa.result;
+}
+
+int
+thread_select (select_func *func, int max_fds, fd_set *rfds,
+               fd_set *wfds, fd_set *efds, struct timespec *timeout,
+               sigset_t *sigmask)
+{
+  return thread_select_1 (func, max_fds, rfds, wfds, efds, timeout, sigmask,
+                          true);
+}
+
+int
+thread_select_no_select_lock (select_func *func, int max_fds, fd_set *rfds,
+                              fd_set *wfds, fd_set *efds,
+                              struct timespec *timeout, sigset_t *sigmask)
+{
+  return thread_select_1 (func, max_fds, rfds, wfds, efds, timeout, sigmask,
+                          false);
 }
 
 

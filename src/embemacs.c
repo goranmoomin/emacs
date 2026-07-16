@@ -27,6 +27,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "coding.h"
 
+#include <stdio.h>
+
 bool embemacs_host_owns_app;
 
 void
@@ -35,20 +37,24 @@ embemacs_set_embed_parent_view (void *parent_view)
 #ifdef HAVE_NS
   embemacs_embed_parent_view = parent_view;
 #else
-  (void) parent_view;
+  if (parent_view != NULL)
+    fputs ("embemacs: NS embed parent is unavailable in this build\n",
+           stderr);
 #endif
 }
 
 void
 embemacs_set_embed_parent_widget (void *parent_widget)
 {
+#if defined HAVE_PGTK && defined __linux__ \
+  && (defined __aarch64__ || defined __x86_64__)
   pgtkembed_set_parent_widget (parent_widget);
-#ifdef HAVE_PGTK
-  embemacs_host_owns_app = parent_widget != NULL;
+#else
+  if (parent_widget != NULL)
+    fputs ("embemacs: PGTK embed parent is unavailable in this build\n",
+           stderr);
 #endif
 }
-
-#include <stdio.h>
 
 #if (defined HAVE_NS && defined NS_IMPL_COCOA) \
   || (defined HAVE_PGTK && defined __linux__ \
@@ -81,7 +87,7 @@ embemacs_parent_set_p (void)
 #if defined HAVE_NS && defined NS_IMPL_COCOA
   return embemacs_embed_parent_view != NULL;
 #else
-  return pgtkembed_parent_widget_set_p ();
+  return pgtkembed_parent_pending_p ();
 #endif
 }
 
@@ -447,7 +453,7 @@ embemacs_start (int argc, char **argv)
     {
       embemacs_host_owns_app = false;
       embemacs_free_start_args (args);
-      return embemacs_start_fail (EMBEMACS_ERR_NO_MEMORY,
+      return embemacs_start_fail (EMBEMACS_ERR_BACKEND,
                                   "embemacs_start could not install the backend fiber driver");
     }
   if (!embfiber_launch (embemacs_start_entry, args, EMBFIBER_DEFAULT_STACK_SIZE))
@@ -478,7 +484,7 @@ embemacs_start (int argc, char **argv)
   (void) argc;
   (void) argv;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs_start requires the Cocoa NS or PGTK port");
+                              "embemacs_start is unsupported by this build or architecture");
 }
 
 int
@@ -498,7 +504,7 @@ embemacs_eval_async_with_result (const char *lisp,
   (void) callback;
   (void) context;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs_eval_async requires the Cocoa NS or PGTK port");
+                              "embemacs_eval_async_with_result is unsupported by this build");
 }
 
 void

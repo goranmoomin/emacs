@@ -23,10 +23,6 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "sysselect.h"
 
-#ifdef HAVE_GLIB
-# include <glib.h>
-#endif
-
 struct timespec;
 
 extern int xg_select (int, fd_set *, fd_set *, fd_set *,
@@ -35,6 +31,6 @@ extern void suppress_xg_select (void);
 extern void release_xg_select (void);
 
 extern void release_select_lock (void);
-extern void acquire_select_lock (GMainContext *context);
+extern void reacquire_select_lock (void);
 
 #endif /* XGSELECT_H */

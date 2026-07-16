@@ -46,23 +46,26 @@ release_select_lock (void)
 #if GNUC_PREREQ (4, 7, 0)
   ptrdiff_t old = __atomic_load_n (&threads_holding_glib_lock,
                                    __ATOMIC_ACQUIRE);
-  while (old > 0
-         && !__atomic_compare_exchange_n (&threads_holding_glib_lock, &old,
-                                          old - 1, false,
-                                          __ATOMIC_ACQ_REL,
-                                          __ATOMIC_ACQUIRE))
-    continue;
+  while (true)
+    {
+      if (old <= 0)
+        emacs_abort ();
+      if (__atomic_compare_exchange_n (&threads_holding_glib_lock, &old,
+                                       old - 1, false, __ATOMIC_ACQ_REL,
+                                       __ATOMIC_ACQUIRE))
+        break;
+    }
   if (old == 1)
     g_main_context_release (glib_main_context);
 #else
   if (threads_holding_glib_lock <= 0)
-    return;
+    emacs_abort ();
   if (--threads_holding_glib_lock == 0)
     g_main_context_release (glib_main_context);
 #endif
 }
 
-void
+static void
 acquire_select_lock (GMainContext *context)
 {
 #if GNUC_PREREQ (4, 7, 0)
@@ -84,6 +87,12 @@ acquire_select_lock (GMainContext *context)
 	}
     }
 #endif
+}
+
+void
+reacquire_select_lock (void)
+{
+  acquire_select_lock (g_main_context_default ());
 }
 
 /* Call this to not use xg_select when using it would be a bad idea,
@@ -130,7 +139,6 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
   int n_gfds, retval = 0, our_fds = 0, max_fds = fds_lim - 1;
   int i, nfds, tmo_in_millisec, must_free = 0;
   bool need_to_dispatch;
-  bool select_lock_acquired;
 #ifdef USE_GTK
   bool already_has_events;
 #endif
@@ -146,10 +154,17 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
       return -1;
     }
 
+#ifdef HAVE_PGTK
+  /* In embedded mode the host thread owns and dispatches the default GLib
+     context.  Lisp worker threads must wait only on their own descriptors;
+     trying to acquire the host-owned context here would spin forever.  */
+  if (embfiber_active && !embfiber_on_fiber)
+    return thread_select_no_select_lock (pselect, fds_lim, rfds, wfds, efds,
+                                         timeout, sigmask);
+#endif
+
   context = g_main_context_default ();
-  select_lock_acquired = !g_main_context_is_owner (context);
-  if (select_lock_acquired)
-    acquire_select_lock (context);
+  acquire_select_lock (context);
 
 #ifdef USE_GTK
   already_has_events = g_main_context_pending (context);
@@ -183,8 +198,7 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
       {
         if (must_free)
           xfree (gfds);
-        if (select_lock_acquired)
-          release_select_lock ();
+        release_select_lock ();
         errno = EINVAL;
         return -1;
       }
@@ -261,10 +275,9 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
       if (efds)
 	FD_ZERO (efds);
       our_fds++;
-      /* No thread_select call will balance a context acquisition in this
+      /* No thread_select call will release the context acquisition in this
          fast path.  */
-      if (select_lock_acquired)
-        release_select_lock ();
+      release_select_lock ();
     }
 #endif
 
@@ -319,9 +332,7 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
   if (need_to_dispatch)
     {
-      bool dispatch_lock_acquired = !g_main_context_is_owner (context);
-      if (dispatch_lock_acquired)
-        acquire_select_lock (context);
+      acquire_select_lock (context);
 
       int pselect_errno = errno;
       /* Prevent g_main_dispatch recursion, that would occur without
@@ -332,8 +343,7 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
         g_main_context_dispatch (context);
       unblock_input ();
       errno = pselect_errno;
-      if (dispatch_lock_acquired)
-        release_select_lock ();
+      release_select_lock ();
     }
 
   /* To not have to recalculate timeout, return like this.  */

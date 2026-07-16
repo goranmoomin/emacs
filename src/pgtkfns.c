@@ -802,7 +802,10 @@ xg_set_icon_from_xpm_data (struct frame *f, const char **data)
     return false;
 
   if (!FRAME_GTK_OUTER_WIDGET (f))
-    return false;
+    {
+      g_object_unref (pixbuf);
+      return false;
+    }
 
   gtk_window_set_icon (GTK_WINDOW (FRAME_GTK_OUTER_WIDGET (f)), pixbuf);
   g_object_unref (pixbuf);

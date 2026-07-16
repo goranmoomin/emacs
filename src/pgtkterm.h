@@ -386,9 +386,8 @@ struct pgtk_output
   GtkWidget *vbox_widget;
   /* The widget used for laying out widgets horizontally.  */
   GtkWidget *hbox_widget;
-  /* In same-process PGTK embedding, the vbox above is reparented from its
-     temporary GtkWindow into this host-owned container hierarchy.  */
-  GtkWidget *embed_container;
+  /* True when vbox_widget was moved from its temporary GtkWindow into the
+     host's same-process container hierarchy.  */
   bool_bf embedded_in_host : 1;
   /* The menubar in this frame.  */
   GtkWidget *menubar_widget;

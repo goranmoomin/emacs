@@ -70,6 +70,7 @@ struct pgtk_embfiber_wait_source
   int n_registered;
   bool have_nonpollable_fd;
   bool active;
+  bool forced_pending;
   int result;
   int result_errno;
 };
@@ -94,6 +95,15 @@ pgtk_embfiber_drain_timerfd (int timer_fd)
 }
 
 static void
+pgtk_embfiber_clear_registered_fds (struct pgtk_embfiber_wait_source *wait)
+{
+  for (int i = 0; i < wait->n_registered; ++i)
+    (void) epoll_ctl (wait->epoll_fd, EPOLL_CTL_DEL,
+                      wait->registered_fds[i], NULL);
+  wait->n_registered = 0;
+}
+
+static void
 pgtk_embfiber_finish_select (struct pgtk_embfiber_wait_source *wait)
 {
   struct epoll_event events[FD_SETSIZE + 2];
@@ -101,6 +111,11 @@ pgtk_embfiber_finish_select (struct pgtk_embfiber_wait_source *wait)
   int ready = 0;
   bool forced = false;
   bool timer_ready = false;
+
+  /* The event array is now self-contained.  Remove per-wait descriptors
+     immediately so nested GTK loops cannot spin on stale level-triggered
+     readiness while the fiber is running.  */
+  pgtk_embfiber_clear_registered_fds (wait);
 
   if (wait->rfds != NULL)
     FD_ZERO (wait->rfds);
@@ -190,11 +205,38 @@ pgtk_embfiber_finish_select (struct pgtk_embfiber_wait_source *wait)
   wait->result_errno = n_events < 0 ? errno : 0;
 }
 
+static void
+pgtk_embfiber_discard_inactive_events (struct pgtk_embfiber_wait_source *wait)
+{
+  struct epoll_event events[4];
+  int n_events;
+
+  do
+    {
+      n_events = epoll_wait (wait->epoll_fd, events, ARRAYELTS (events), 0);
+      for (int i = 0; i < n_events; ++i)
+        {
+          if (events[i].data.fd == pgtk_embfiber_wake_pipe[0])
+            {
+              pgtk_embfiber_drain_wake_pipe ();
+              wait->forced_pending = true;
+            }
+          else if (events[i].data.fd == wait->timer_fd)
+            pgtk_embfiber_drain_timerfd (wait->timer_fd);
+        }
+    }
+  while (n_events == ARRAYELTS (events));
+  wait->epoll_poll.revents = 0;
+}
+
 static gboolean
 pgtk_embfiber_source_check (GSource *source)
 {
   struct pgtk_embfiber_wait_source *wait
     = (struct pgtk_embfiber_wait_source *) source;
+
+  if (!wait->active && wait->epoll_poll.revents != 0)
+    pgtk_embfiber_discard_inactive_events (wait);
   return wait->active && wait->epoll_poll.revents != 0;
 }
 
@@ -219,22 +261,37 @@ pgtk_embfiber_source_dispatch (GSource *source, GSourceFunc callback,
   return G_SOURCE_CONTINUE;
 }
 
+static void
+pgtk_embfiber_source_finalize (GSource *source)
+{
+  struct pgtk_embfiber_wait_source *wait
+    = (struct pgtk_embfiber_wait_source *) source;
+
+  pgtk_embfiber_clear_registered_fds (wait);
+  if (wait->timer_fd >= 0)
+    close (wait->timer_fd);
+  if (wait->epoll_fd >= 0)
+    close (wait->epoll_fd);
+  /* The wake pipe is process-lifetime storage.  A fatal-signal handler can
+     race with source finalization after observing embfiber_resumable, so
+     closing and reusing these descriptors would make its write unsafe.  */
+  if (pgtk_embfiber_wait == wait)
+    pgtk_embfiber_wait = NULL;
+}
+
 static GSourceFuncs pgtk_embfiber_source_funcs =
 {
   .check = pgtk_embfiber_source_check,
   .dispatch = pgtk_embfiber_source_dispatch,
+  .finalize = pgtk_embfiber_source_finalize,
 };
 
 bool
 pgtkembed_ui_thread_p (void)
 {
+  /* V1 deliberately supports the conventional GTK setup where the process's
+     initial thread owns the default GMainContext and top-level loop.  */
   return (pid_t) syscall (SYS_gettid) == getpid ();
-}
-
-bool
-pgtkembed_parent_widget_set_p (void)
-{
-  return GTK_IS_CONTAINER (pgtkembed_parent_widget);
 }
 
 bool
@@ -298,7 +355,9 @@ pgtk_embfiber_install_driver (void)
   wait = (struct pgtk_embfiber_wait_source *) source;
   wait->epoll_fd = epoll_fd;
   wait->timer_fd = timer_fd;
-  wait->epoll_poll.fd = epoll_fd;
+  epoll_fd = -1;
+  timer_fd = -1;
+  wait->epoll_poll.fd = wait->epoll_fd;
   wait->epoll_poll.events = G_IO_IN;
   g_source_add_poll (source, &wait->epoll_poll);
   g_source_set_priority (source, G_PRIORITY_HIGH - 20);
@@ -379,6 +438,12 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
       fputs ("embemacs: nested PGTK fiber select wait\n", stderr);
       abort ();
     }
+  if (wait->forced_pending)
+    {
+      wait->forced_pending = false;
+      errno = EINTR;
+      return -1;
+    }
 
   wait->fds_lim = fds_lim;
   wait->rfds = rfds;
@@ -391,10 +456,7 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
   wait->result = 0;
   wait->result_errno = 0;
   wait->epoll_poll.revents = 0;
-  for (int i = 0; i < wait->n_registered; ++i)
-    (void) epoll_ctl (wait->epoll_fd, EPOLL_CTL_DEL,
-                      wait->registered_fds[i], NULL);
-  wait->n_registered = 0;
+  pgtk_embfiber_clear_registered_fds (wait);
   if (rfds != NULL)
     wait->want_rfds = *rfds;
   if (wfds != NULL)
@@ -423,7 +485,9 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
             wait->have_nonpollable_fd = true;
           else
             {
-              wait->result_errno = errno;
+              int saved_errno = errno;
+              pgtk_embfiber_clear_registered_fds (wait);
+              errno = saved_errno;
               return -1;
             }
         }
@@ -441,7 +505,12 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
         timer.it_value.tv_nsec = 1;
     }
   if (timerfd_settime (wait->timer_fd, 0, &timer, NULL) != 0)
-    return -1;
+    {
+      int saved_errno = errno;
+      pgtk_embfiber_clear_registered_fds (wait);
+      errno = saved_errno;
+      return -1;
+    }
 
   wait->active = true;
 
@@ -450,6 +519,10 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
      dispatch frame already owns CONTEXT, so release_select_lock is a no-op.  */
   release_select_lock ();
   embfiber_park ();
+  /* really_call_select releases once after the select function returns, so
+     restore this call's context-lock reference before unwinding to it.  The
+     source callback already owns the same context on this GUI thread.  */
+  reacquire_select_lock ();
 
   int result = wait->result;
   int result_errno = wait->result_errno;
@@ -461,13 +534,19 @@ pgtk_embfiber_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
 void
 pgtkembed_set_parent_widget (void *parent_widget)
 {
+  if (parent_widget != NULL && !GTK_IS_CONTAINER (parent_widget))
+    {
+      fputs ("embemacs: PGTK embed parent is not a GtkContainer\n", stderr);
+      pgtkembed_parent_widget = NULL;
+      return;
+    }
   pgtkembed_parent_widget = parent_widget;
 }
 
 bool
 pgtkembed_parent_pending_p (void)
 {
-  return pgtkembed_parent_widget != NULL;
+  return GTK_IS_CONTAINER (pgtkembed_parent_widget);
 }
 
 bool
@@ -538,7 +617,6 @@ pgtkembed_attach_frame (struct frame *f)
 
   FRAME_GTK_OUTER_WIDGET (f) = NULL;
   FRAME_X_OUTPUT (f)->embedded_in_host = true;
-  FRAME_X_OUTPUT (f)->embed_container = content;
   FRAME_X_OUTPUT (f)->explicit_parent = true;
   pgtkembed_parent_widget = NULL;
 
@@ -578,12 +656,6 @@ pgtkembed_frame_p (struct frame *f)
 
 bool
 pgtkembed_ui_thread_p (void)
-{
-  return false;
-}
-
-bool
-pgtkembed_parent_widget_set_p (void)
 {
   return false;
 }

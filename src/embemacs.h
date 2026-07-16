@@ -92,7 +92,8 @@ enum embemacs_start_result
   EMBEMACS_ERR_UNSUPPORTED = -5,
   EMBEMACS_ERR_INVALID_ARGUMENT = -6,
   EMBEMACS_ERR_NO_MEMORY = -7,
-  EMBEMACS_ERR_NOT_RUNNING = -8
+  EMBEMACS_ERR_NOT_RUNNING = -8,
+  EMBEMACS_ERR_BACKEND = -9
 };
 
 /* Fiber-mode entry: start Emacs on its own stack on the GUI main thread, so

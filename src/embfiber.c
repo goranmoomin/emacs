@@ -33,6 +33,12 @@ embfiber_abort_on_host_stack (const char *operation, const char *entry)
 #if defined __linux__ && defined __x86_64__
 # include <asm/prctl.h>
 # include <sys/syscall.h>
+# ifndef ARCH_SHSTK_STATUS
+#  define ARCH_SHSTK_STATUS 0x5005
+# endif
+# ifndef ARCH_SHSTK_SHSTK
+#  define ARCH_SHSTK_SHSTK (1ULL << 0)
+# endif
 #endif
 
 bool
@@ -44,6 +50,8 @@ embfiber_platform_supported_p (void)
       && (status & ARCH_SHSTK_SHSTK) != 0)
     return false;
 #endif
+  /* AArch64 guarded-control-stack enablement will need an equivalent runtime
+     check before Linux distributions begin enabling it for host processes. */
   return true;
 }
 

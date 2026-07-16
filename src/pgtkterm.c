@@ -524,8 +524,8 @@ pgtk_free_frame_resources (struct frame *f)
     }
 
   if (FRAME_PGTK_EMBEDDED_P (f)
-      && FRAME_X_OUTPUT (f)->embed_container != NULL)
-    gtk_widget_destroy (FRAME_X_OUTPUT (f)->embed_container);
+      && FRAME_X_OUTPUT (f)->vbox_widget != NULL)
+    gtk_widget_destroy (FRAME_X_OUTPUT (f)->vbox_widget);
   else
     gtk_widget_destroy (FRAME_WIDGET (f));
 
