@@ -37,9 +37,14 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "lisp.h"
 #include "sysselect.h"
 #include "blockinput.h"
-#ifdef HAVE_NS
+#if defined HAVE_NS || defined HAVE_PGTK
 # include "embfiber.h"
+#endif
+#ifdef HAVE_NS
 # include "nsterm.h"
+#endif
+#ifdef HAVE_PGTK
+# include "pgtkembed.h"
 #endif
 
 #ifdef HAVE_LINUX_FS_H
@@ -1794,14 +1799,18 @@ static volatile sig_atomic_t deferred_fatal_signal;
 static bool
 maybe_defer_fatal_signal (int sig)
 {
-#ifdef HAVE_NS
-  if (embfiber_active && !embfiber_on_fiber
+#if defined HAVE_NS || defined HAVE_PGTK
+  if (embfiber_active && embfiber_resumable && !embfiber_on_fiber
       && (sig == SIGTERM || sig == SIGHUP || sig == SIGINT))
     {
       if (deferred_fatal_signal == 0)
         deferred_fatal_signal = sig;
       pending_signals = true;
+#ifdef HAVE_NS
       ns_wakeup_for_embfiber_signal ();
+#else
+      pgtk_embfiber_wake_from_signal ();
+#endif
       return true;
     }
 #else

@@ -64,6 +64,7 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "font.h"
 #include "xsettings.h"
 #include "emacsgtkfixed.h"
+#include "pgtkembed.h"
 
 #ifdef GDK_WINDOWING_WAYLAND
 #include <gdk/gdkwayland.h>
@@ -522,7 +523,11 @@ pgtk_free_frame_resources (struct frame *f)
       FRAME_X_OUTPUT (f)->scrollbar_background_css_provider = NULL;
     }
 
-  gtk_widget_destroy (FRAME_WIDGET (f));
+  if (FRAME_PGTK_EMBEDDED_P (f)
+      && FRAME_X_OUTPUT (f)->embed_container != NULL)
+    gtk_widget_destroy (FRAME_X_OUTPUT (f)->embed_container);
+  else
+    gtk_widget_destroy (FRAME_WIDGET (f));
 
   if (FRAME_X_OUTPUT (f)->cr_surface_visible_bell != NULL)
     {
@@ -657,7 +662,7 @@ pgtk_set_offset (struct frame *f, int xoff, int yoff, int change_gravity)
   block_input ();
   xg_wm_set_size_hint (f, 0, false);
 
-  if (change_gravity != 0)
+  if (change_gravity != 0 && !FRAME_PGTK_EMBEDDED_P (f))
     {
       if (FRAME_GTK_OUTER_WIDGET (f))
 	gtk_window_move (GTK_WINDOW (FRAME_GTK_OUTER_WIDGET (f)),
@@ -682,6 +687,22 @@ pgtk_set_window_size (struct frame *f, bool change_gravity,
    -------------------------------------------------------------------------- */
 {
   block_input ();
+
+  /* The host container owns embedded-frame geometry.  A later
+     set-frame-size must not impose a size request on the host UI; the
+     size-allocate callback will keep Emacs's rows and columns in sync.  */
+  if (FRAME_PGTK_EMBEDDED_P (f))
+    {
+      /* adjust_frame_size has already changed Emacs's requested logical
+         size, but the host owns the actual allocation.  Queue a fresh GTK
+         allocation so size_allocate reconciles Emacs after this resize call
+         unwinds; calling xg_frame_resized recursively here corrupts frame
+         creation/resize state.  */
+      gtk_widget_queue_resize (FRAME_GTK_WIDGET (f));
+      gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
+      unblock_input ();
+      return;
+    }
 
   f->output_data.pgtk->preferred_width = pixelwidth;
   f->output_data.pgtk->preferred_height = pixelheight;
@@ -7080,7 +7101,11 @@ pgtk_term_init (Lisp_Object display_name, char *resource_name)
 	id = g_log_set_handler ("GLib", G_LOG_LEVEL_WARNING | G_LOG_FLAG_FATAL
 				| G_LOG_FLAG_RECURSION, my_log_handler, NULL);
 
-	gtk_disable_setlocale ();
+	/* A PGTK embedding host has already initialized GTK while constructing
+	   the parent widget.  gtk_disable_setlocale must precede the first
+	   gtk_init call, so do not invoke it late in that mode.  */
+	if (!pgtkembed_parent_pending_p ())
+	  gtk_disable_setlocale ();
 	unrequest_sigio ();	/* See comment in x_display_ok.  */
 	gtk_init (&argc, &argv2);
 	request_sigio ();

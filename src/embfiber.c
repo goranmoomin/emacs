@@ -8,8 +8,9 @@
 #include <stdlib.h>
 
 volatile bool embfiber_active;
-volatile bool embfiber_on_fiber;
-bool embfiber_forbid_lisp;
+volatile sig_atomic_t embfiber_resumable;
+EMBFIBER_TLS volatile bool embfiber_on_fiber;
+EMBFIBER_TLS bool embfiber_forbid_lisp;
 
 void
 embfiber_abort_on_host_stack (const char *operation, const char *entry)
@@ -21,22 +22,46 @@ embfiber_abort_on_host_stack (const char *operation, const char *entry)
   abort ();
 }
 
-#if defined HAVE_NS || defined EMBFIBER_TEST
+#if (defined HAVE_NS || defined HAVE_PGTK || defined EMBFIBER_TEST) \
+  && (defined __aarch64__ || defined __x86_64__)
 
 #include <errno.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#if defined __linux__ && defined __x86_64__
+# include <asm/prctl.h>
+# include <sys/syscall.h>
+#endif
+
+bool
+embfiber_platform_supported_p (void)
+{
+#if defined __linux__ && defined __x86_64__
+  unsigned long status = 0;
+  if (syscall (SYS_arch_prctl, ARCH_SHSTK_STATUS, &status) == 0
+      && (status & ARCH_SHSTK_SHSTK) != 0)
+    return false;
+#endif
+  return true;
+}
 
 /* The switch assembly has no CFI directives, so debugger backtraces stop
    at the fiber boundary.  */
+/* Mach-O prefixes C symbols with an underscore; ELF does not.  */
+#if defined (__APPLE__)
+# define EMBFIBER_SWITCH_ASM "_embfiber_switch"
+#else
+# define EMBFIBER_SWITCH_ASM "embfiber_switch"
+#endif
+
 #if defined (__aarch64__)
 __asm__ (
 ".text\n"
 ".align 2\n"
-".globl _embfiber_switch\n"
-"_embfiber_switch:\n"
+".globl " EMBFIBER_SWITCH_ASM "\n"
+EMBFIBER_SWITCH_ASM ":\n"
 "  stp d14, d15, [sp, #-16]!\n"
 "  stp d12, d13, [sp, #-16]!\n"
 "  stp d10, d11, [sp, #-16]!\n"
@@ -64,8 +89,8 @@ __asm__ (
 #elif defined (__x86_64__)
 __asm__ (
 ".text\n"
-".globl _embfiber_switch\n"
-"_embfiber_switch:\n"
+".globl " EMBFIBER_SWITCH_ASM "\n"
+EMBFIBER_SWITCH_ASM ":\n"
 "  pushq %rbp\n"
 "  pushq %rbx\n"
 "  pushq %r12\n"
@@ -191,6 +216,7 @@ embfiber_trampoline (void)
 {
   embfiber_entry (embfiber_entry_arg);
   embfiber_done = true;
+  embfiber_resumable = 0;
   embfiber_set_on_fiber (false);
 
   for (;;)
@@ -212,6 +238,7 @@ embfiber_launch (void (*entry) (void *), void *arg, size_t stack_size)
   embfiber_launched = true;
   /* This is the single place that marks fiber mode active.  */
   embfiber_active = true;
+  embfiber_resumable = 1;
   embfiber_forbid_lisp = true;
 
   if (!embfiber_resume ())
@@ -255,6 +282,7 @@ embfiber_exit (void)
     embfiber_die ("exit called while not on fiber");
 
   embfiber_done = true;
+  embfiber_resumable = 0;
   embfiber_set_on_fiber (false);
 
   for (;;)
@@ -451,4 +479,5 @@ main (void)
 }
 #endif /* EMBFIBER_TEST */
 
-#endif /* HAVE_NS || EMBFIBER_TEST */
+#endif /* (HAVE_NS || HAVE_PGTK || EMBFIBER_TEST)
+          && (__aarch64__ || __x86_64__) */

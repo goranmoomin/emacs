@@ -386,6 +386,10 @@ struct pgtk_output
   GtkWidget *vbox_widget;
   /* The widget used for laying out widgets horizontally.  */
   GtkWidget *hbox_widget;
+  /* In same-process PGTK embedding, the vbox above is reparented from its
+     temporary GtkWindow into this host-owned container hierarchy.  */
+  GtkWidget *embed_container;
+  bool_bf embedded_in_host : 1;
   /* The menubar in this frame.  */
   GtkWidget *menubar_widget;
   /* The tool bar in this frame  */
@@ -482,6 +486,7 @@ enum
 #define FRAME_FONT(f)             (FRAME_X_OUTPUT (f)->font)
 #define FRAME_GTK_OUTER_WIDGET(f) (FRAME_X_OUTPUT (f)->widget)
 #define FRAME_GTK_WIDGET(f)       (FRAME_X_OUTPUT (f)->edit_widget)
+#define FRAME_PGTK_EMBEDDED_P(f)  (FRAME_X_OUTPUT (f)->embedded_in_host)
 #define FRAME_WIDGET(f)           (FRAME_GTK_OUTER_WIDGET (f)	\
                                    ? FRAME_GTK_OUTER_WIDGET (f)	\
                                    : FRAME_GTK_WIDGET (f))

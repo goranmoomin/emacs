@@ -22,15 +22,37 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "embemacs.h"
 #include "embfiber.h"
 #include "nsembed.h"
+#include "pgtkembed.h"
 
 #include "lisp.h"
 #include "coding.h"
 
 bool embemacs_host_owns_app;
 
+void
+embemacs_set_embed_parent_view (void *parent_view)
+{
+#ifdef HAVE_NS
+  embemacs_embed_parent_view = parent_view;
+#else
+  (void) parent_view;
+#endif
+}
+
+void
+embemacs_set_embed_parent_widget (void *parent_widget)
+{
+  pgtkembed_set_parent_widget (parent_widget);
+#ifdef HAVE_PGTK
+  embemacs_host_owns_app = parent_widget != NULL;
+#endif
+}
+
 #include <stdio.h>
 
-#if defined HAVE_NS && defined NS_IMPL_COCOA
+#if (defined HAVE_NS && defined NS_IMPL_COCOA) \
+  || (defined HAVE_PGTK && defined __linux__ \
+      && (defined __aarch64__ || defined __x86_64__))
 
 #include <pthread.h>
 #include <stdlib.h>
@@ -43,10 +65,47 @@ embemacs_start_fail (enum embemacs_start_result code, const char *message)
   return code;
 }
 
-void
-embemacs_set_embed_parent_view (void *parent_view)
+static bool
+embemacs_ui_thread_p (void)
 {
-  embemacs_embed_parent_view = parent_view;
+#if defined HAVE_NS && defined NS_IMPL_COCOA
+  return pthread_main_np ();
+#else
+  return pgtkembed_ui_thread_p ();
+#endif
+}
+
+static bool
+embemacs_parent_set_p (void)
+{
+#if defined HAVE_NS && defined NS_IMPL_COCOA
+  return embemacs_embed_parent_view != NULL;
+#else
+  return pgtkembed_parent_widget_set_p ();
+#endif
+}
+
+static bool
+embemacs_install_backend_driver (void)
+{
+#if defined HAVE_NS && defined NS_IMPL_COCOA
+  embfiber_install_event_monitor ();
+  return true;
+#else
+  return pgtk_embfiber_install_driver ();
+#endif
+}
+
+static void
+embemacs_wake_fiber (void)
+{
+#if defined HAVE_NS && defined NS_IMPL_COCOA
+  /* Declared in nsterm.h, which is not includable from C here.  */
+  extern void ns_send_appdefined (int value);
+  ns_send_appdefined (-1);
+#else
+  pgtk_embfiber_wake ();
+#endif
 }
 
 struct embemacs_start_args
@@ -83,7 +142,7 @@ static void *embemacs_exit_ctx;
 int
 embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
 {
-  if (!pthread_main_np ())
+  if (!embemacs_ui_thread_p ())
     return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
                                 "embemacs_set_ready_callback must be called on the main thread");
   embemacs_ready_cb = callback;
@@ -94,7 +153,7 @@ embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
 int
 embemacs_set_title_callback (embemacs_title_callback callback, void *context)
 {
-  if (!pthread_main_np ())
+  if (!embemacs_ui_thread_p ())
     return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
                                 "embemacs_set_title_callback must be called on the main thread");
   embemacs_title_cb = callback;
@@ -105,7 +164,7 @@ embemacs_set_title_callback (embemacs_title_callback callback, void *context)
 int
 embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
 {
-  if (!pthread_main_np ())
+  if (!embemacs_ui_thread_p ())
     return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
                                 "embemacs_set_exit_callback must be called on the main thread");
   embemacs_exit_cb = callback;
@@ -154,7 +213,7 @@ embemacs_handle_exit (int exit_code)
 /* --- Host-queued async evaluation ---------------------------------------
 
    The host enqueues UTF-8 expression strings on the main thread and
-   wakes a parked fiber with an appdefined event; the command loop's
+   wakes a parked fiber through the backend gate; the command loop's
    timer check drains the queue on the fiber (embemacs_run_pending_evals,
    called from timer_check_2 in keyboard.c next to pending_funcalls).
    Host and fiber strictly alternate on the main thread, so the queue
@@ -171,16 +230,13 @@ struct embemacs_eval_request
 static struct embemacs_eval_request *embemacs_eval_head;
 static struct embemacs_eval_request *embemacs_eval_tail;
 
-/* Declared in nsterm.h, which is not includable from C here.  */
-extern void ns_send_appdefined (int value);
-
 static int
 embemacs_eval_enqueue (const char *lisp, embemacs_eval_callback callback,
                        void *context)
 {
   struct embemacs_eval_request *req;
 
-  if (!pthread_main_np ())
+  if (!embemacs_ui_thread_p ())
     return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
                                 "embemacs_eval_async must be called on the main thread");
   if (!embfiber_launched_p () || embfiber_finished_p ())
@@ -213,7 +269,7 @@ embemacs_eval_enqueue (const char *lisp, embemacs_eval_callback callback,
 
   /* Wake a parked fiber so the command loop reaches its next timer
      check promptly.  */
-  ns_send_appdefined (-1);
+  embemacs_wake_fiber ();
   return EMBEMACS_OK;
 }
 
@@ -326,15 +382,18 @@ embemacs_start (int argc, char **argv)
   char **copy;
   int i;
 
-  if (!pthread_main_np ())
+  if (!embemacs_ui_thread_p ())
     return embemacs_start_fail (EMBEMACS_ERR_WRONG_THREAD,
                                 "embemacs_start must be called on the main thread");
+  if (!embfiber_platform_supported_p ())
+    return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
+                                "embemacs_start cannot switch stacks while CET shadow stack is active");
   if (embfiber_launched_p ())
     return embemacs_start_fail (EMBEMACS_ERR_ALREADY_STARTED,
                                 "embemacs_start called after Emacs already started");
-  if (embemacs_embed_parent_view == NULL)
-    return embemacs_start_fail (EMBEMACS_ERR_NO_PARENT_VIEW,
-                                "embemacs_start requires an embed parent view");
+  if (!embemacs_parent_set_p ())
+    return embemacs_start_fail (EMBEMACS_ERR_NO_EMBED_PARENT,
+                                "embemacs_start requires an embed parent widget/view");
   if (argc < 0)
     return embemacs_start_fail (EMBEMACS_ERR_INVALID_ARGUMENT,
                                 "embemacs_start called with negative argc");
@@ -384,7 +443,13 @@ embemacs_start (int argc, char **argv)
   /* Process-lifetime copy: it becomes a real leak only if emacs_main
      ever returns in fiber mode.  */
   embemacs_host_owns_app = true;
-  embfiber_install_event_monitor ();
+  if (!embemacs_install_backend_driver ())
+    {
+      embemacs_host_owns_app = false;
+      embemacs_free_start_args (args);
+      return embemacs_start_fail (EMBEMACS_ERR_NO_MEMORY,
+                                  "embemacs_start could not install the backend fiber driver");
+    }
   if (!embfiber_launch (embemacs_start_entry, args, EMBFIBER_DEFAULT_STACK_SIZE))
     {
       embemacs_host_owns_app = false;
@@ -398,7 +463,7 @@ embemacs_start (int argc, char **argv)
   return EMBEMACS_OK;
 }
 
-#elif defined HAVE_NS
+#else
 
 static int
 embemacs_start_fail (enum embemacs_start_result code, const char *message)
@@ -407,19 +472,13 @@ embemacs_start_fail (enum embemacs_start_result code, const char *message)
   return code;
 }
 
-void
-embemacs_set_embed_parent_view (void *parent_view)
-{
-  embemacs_embed_parent_view = parent_view;
-}
-
 int
 embemacs_start (int argc, char **argv)
 {
   (void) argc;
   (void) argv;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs_start requires the Cocoa NS port");
+                              "embemacs_start requires the Cocoa NS or PGTK port");
 }
 
 int
@@ -427,7 +486,7 @@ embemacs_eval_async (const char *lisp)
 {
   (void) lisp;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs_eval_async requires the Cocoa NS port");
+                              "embemacs_eval_async requires the Cocoa NS or PGTK port");
 }
 
 int
@@ -439,7 +498,7 @@ embemacs_eval_async_with_result (const char *lisp,
   (void) callback;
   (void) context;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs_eval_async requires the Cocoa NS port");
+                              "embemacs_eval_async requires the Cocoa NS or PGTK port");
 }
 
 void
@@ -453,7 +512,7 @@ embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
   (void) callback;
   (void) context;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs callbacks require the Cocoa NS port");
+                              "embemacs callbacks require the Cocoa NS or PGTK port");
 }
 
 int
@@ -462,7 +521,7 @@ embemacs_set_title_callback (embemacs_title_callback callback, void *context)
   (void) callback;
   (void) context;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs callbacks require the Cocoa NS port");
+                              "embemacs callbacks require the Cocoa NS or PGTK port");
 }
 
 int
@@ -471,88 +530,7 @@ embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
   (void) callback;
   (void) context;
   return embemacs_start_fail (EMBEMACS_ERR_UNSUPPORTED,
-                              "embemacs callbacks require the Cocoa NS port");
-}
-
-void
-embemacs_notify_title (const char *title)
-{
-  (void) title;
-}
-
-void
-embemacs_handle_exit (int exit_code)
-{
-  (void) exit_code;
-}
-
-#else
-
-void
-embemacs_set_embed_parent_view (void *parent_view)
-{
-  (void) parent_view;
-}
-
-int
-embemacs_start (int argc, char **argv)
-{
-  (void) argc;
-  (void) argv;
-  fprintf (stderr, "embemacs: embemacs_start requires the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
-}
-
-int
-embemacs_eval_async (const char *lisp)
-{
-  (void) lisp;
-  fprintf (stderr, "embemacs: embemacs_eval_async requires the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
-}
-
-int
-embemacs_eval_async_with_result (const char *lisp,
-                                 embemacs_eval_callback callback,
-                                 void *context)
-{
-  (void) lisp;
-  (void) callback;
-  (void) context;
-  fprintf (stderr, "embemacs: embemacs_eval_async requires the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
-}
-
-void
-embemacs_run_pending_evals (void)
-{
-}
-
-int
-embemacs_set_ready_callback (embemacs_ready_callback callback, void *context)
-{
-  (void) callback;
-  (void) context;
-  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
-}
-
-int
-embemacs_set_title_callback (embemacs_title_callback callback, void *context)
-{
-  (void) callback;
-  (void) context;
-  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
-}
-
-int
-embemacs_set_exit_callback (embemacs_exit_callback callback, void *context)
-{
-  (void) callback;
-  (void) context;
-  fprintf (stderr, "embemacs: embemacs callbacks require the NS port\n");
-  return EMBEMACS_ERR_UNSUPPORTED;
+                              "embemacs callbacks require the Cocoa NS or PGTK port");
 }
 
 void

@@ -35,6 +35,8 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "font.h"
 #include "xsettings.h"
 #include "atimer.h"
+#include "pgtkembed.h"
+#include "embemacs.h"
 
 static int x_decode_color (struct frame *f, Lisp_Object color_name,
 			   int mono_color);
@@ -229,8 +231,9 @@ pgtk_set_alpha_background (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
   /* This prevents GTK from painting the window's background, which
      interferes with transparent background in some environments */
 
-  gtk_widget_set_app_paintable (FRAME_GTK_OUTER_WIDGET (f),
-				f->alpha_background != 1.0);
+  if (FRAME_GTK_OUTER_WIDGET (f))
+    gtk_widget_set_app_paintable (FRAME_GTK_OUTER_WIDGET (f),
+                                  f->alpha_background != 1.0);
 
   if (FRAME_GTK_OUTER_WIDGET (f)
       && gtk_widget_get_realized (FRAME_GTK_OUTER_WIDGET (f))
@@ -297,6 +300,13 @@ pgtk_set_cursor_color (struct frame *f, Lisp_Object arg, Lisp_Object oldval)
 static void
 pgtk_set_name_internal (struct frame *f, Lisp_Object name)
 {
+  if (FRAME_PGTK_EMBEDDED_P (f))
+    {
+      Lisp_Object encoded_name = ENCODE_UTF_8 (name);
+      embemacs_notify_title (SSDATA (encoded_name));
+      return;
+    }
+
   if (FRAME_GTK_OUTER_WIDGET (f))
     {
       block_input ();
@@ -1671,6 +1681,13 @@ DEFUN ("x-create-frame", Fx_create_frame, Sx_create_frame, 1, 1, 0,
      adjust_frame_size call.  */
   gui_default_parameter (f, parms, Qfullscreen, Qnil,
 			 "fullscreen", "Fullscreen", RES_TYPE_SYMBOL);
+
+  /* PGTK/Wayland cannot use XEmbed or foreign native window handles.
+     For same-process embedding, build the frame normally first so all GTK
+     setup and frame parameters see a real GtkWindow, then move the complete
+     frame widget hierarchy into the caller-supplied host container.  */
+  if (pgtkembed_parent_pending_p () && !pgtkembed_attach_frame (f))
+    error ("Failed to attach PGTK frame to the host container");
 
   /* Make the window appear on the frame and enable display, unless
      the caller says not to.  However, with explicit parent, Emacs

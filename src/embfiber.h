@@ -3,17 +3,24 @@
 Internal-only header for libemacs plumbing.  It is not installed, and
 this interface may change without API compatibility guarantees.
 
-Emacs runs on its own stack ("the fiber") on the main thread.  When the
-ns port would otherwise park inside a nested [NSApp run] (ns_select /
-ns_read_socket), it instead switches back to the host stack; the host's
-own [NSApp run] later resumes the fiber when an appdefined event
-arrives.  See API-DESIGN.md in the embemacs superproject.  */
+Emacs runs on its own stack ("the fiber") on the GUI main thread.  At a
+backend wait point it switches back to the host stack; the host-owned AppKit
+or GLib loop later resumes it through the backend wake gate.  See
+API-DESIGN.md in the embemacs superproject.  */
 
 #ifndef EMBFIBER_H
 #define EMBFIBER_H
 
 #include <stdbool.h>
+#include <signal.h>
 #include <stddef.h>
+
+#if defined __ELF__ && (defined __GNUC__ || defined __clang__)
+# define EMBFIBER_TLS \
+  _Thread_local __attribute__ ((tls_model ("initial-exec"), visibility ("hidden")))
+#else
+# define EMBFIBER_TLS _Thread_local
+#endif
 
 /* emacs.c sizes emacs_re_safe_alloca from RLIMIT_STACK and may grow that
    limit before Lisp runs.  In fiber mode that logic still describes the
@@ -30,14 +37,14 @@ extern "C" {
    before the fiber first runs; never cleared).  Volatile because the
    fatal-signal path in sysdep.c reads these from a signal handler.  */
 extern volatile bool embfiber_active;
+/* Signal-safe indication that the launched fiber can still be resumed.  */
+extern volatile sig_atomic_t embfiber_resumable;
 
-/* True while executing on the Emacs fiber stack.  Volatile for the same
-   signal-handler read path as embfiber_active.  */
-extern volatile bool embfiber_on_fiber;
-
-/* Derived hot-path flag: true when Lisp/allocation must not run on the
-   current stack.  */
-extern bool embfiber_forbid_lisp;
+/* These describe the current OS thread.  TLS keeps Lisp worker threads from
+   inheriting the main thread's fiber/host-stack state.  On ELF, initial-exec
+   TLS avoids a signal-handler call through __tls_get_addr.  */
+extern EMBFIBER_TLS volatile bool embfiber_on_fiber;
+extern EMBFIBER_TLS bool embfiber_forbid_lisp;
 
 /* Keep enabled for embedded runs: this is two bool loads and a branch
    when fiber mode is active, and turns host-stack Lisp work into a
@@ -61,6 +68,10 @@ embfiber_check_stack (const char *operation, const char *entry)
 #endif
 }
 
+/* Return whether this build/runtime can safely perform the native stack
+   switch (supported architecture and no active x86 shadow stack).  */
+extern bool embfiber_platform_supported_p (void);
+
 /* Create a fiber with a stack of STACK_SIZE bytes and immediately switch
    to it, calling ENTRY (ARG) there.  Returns (on the host stack) when the
    fiber first yields, or when ENTRY returns.  Main thread only; must be
@@ -71,9 +82,9 @@ extern bool embfiber_launch (void (*entry) (void *), void *arg,
 /* Switch from the fiber back to the host stack.  Fiber only.  */
 extern void embfiber_yield (void);
 
-/* Park the fiber at an AppKit wait point.  Service calls requested from
-   the host are run on the fiber stack and then the fiber parks again;
-   only a non-service resume returns to the caller.  Fiber only.  */
+/* Park the fiber at a backend wait point.  Service calls requested from the
+   host are run on the fiber stack and then the fiber parks again; only a
+   non-service resume returns to the caller.  Fiber only.  */
 extern void embfiber_park (void);
 
 /* Resume the fiber; returns when it next yields or its entry returns.

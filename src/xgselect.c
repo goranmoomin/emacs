@@ -29,6 +29,10 @@ along with GNU Emacs.  If not, see <https://www.gnu.org/licenses/>.  */
 #include "blockinput.h"
 #include "systime.h"
 #include "process.h"
+#ifdef HAVE_PGTK
+# include "embfiber.h"
+# include "pgtkembed.h"
+#endif
 
 static ptrdiff_t threads_holding_glib_lock;
 static GMainContext *glib_main_context;
@@ -40,15 +44,25 @@ void
 release_select_lock (void)
 {
 #if GNUC_PREREQ (4, 7, 0)
-  if (__atomic_sub_fetch (&threads_holding_glib_lock, 1, __ATOMIC_ACQ_REL) == 0)
+  ptrdiff_t old = __atomic_load_n (&threads_holding_glib_lock,
+                                   __ATOMIC_ACQUIRE);
+  while (old > 0
+         && !__atomic_compare_exchange_n (&threads_holding_glib_lock, &old,
+                                          old - 1, false,
+                                          __ATOMIC_ACQ_REL,
+                                          __ATOMIC_ACQUIRE))
+    continue;
+  if (old == 1)
     g_main_context_release (glib_main_context);
 #else
+  if (threads_holding_glib_lock <= 0)
+    return;
   if (--threads_holding_glib_lock == 0)
     g_main_context_release (glib_main_context);
 #endif
 }
 
-static void
+void
 acquire_select_lock (GMainContext *context)
 {
 #if GNUC_PREREQ (4, 7, 0)
@@ -116,6 +130,7 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
   int n_gfds, retval = 0, our_fds = 0, max_fds = fds_lim - 1;
   int i, nfds, tmo_in_millisec, must_free = 0;
   bool need_to_dispatch;
+  bool select_lock_acquired;
 #ifdef USE_GTK
   bool already_has_events;
 #endif
@@ -123,8 +138,18 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
   if (xg_select_suppress_count)
     return pselect (fds_lim, rfds, wfds, efds, timeout, sigmask);
 
+  /* fd_set cannot represent larger descriptors.  Check both caller and GLib
+     descriptors before using FD_SET instead of corrupting the stack.  */
+  if (fds_lim < 0 || fds_lim > FD_SETSIZE)
+    {
+      errno = EINVAL;
+      return -1;
+    }
+
   context = g_main_context_default ();
-  acquire_select_lock (context);
+  select_lock_acquired = !g_main_context_is_owner (context);
+  if (select_lock_acquired)
+    acquire_select_lock (context);
 
 #ifdef USE_GTK
   already_has_events = g_main_context_pending (context);
@@ -154,7 +179,20 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
     }
 
   for (i = 0; i < n_gfds; ++i)
+    if (gfds[i].fd >= FD_SETSIZE)
+      {
+        if (must_free)
+          xfree (gfds);
+        if (select_lock_acquired)
+          release_select_lock ();
+        errno = EINVAL;
+        return -1;
+      }
+
+  for (i = 0; i < n_gfds; ++i)
     {
+      if (gfds[i].fd < 0)
+        continue;
       if (gfds[i].events & G_IO_IN)
         {
           FD_SET (gfds[i].fd, &all_rfds);
@@ -202,9 +240,16 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
   if (!already_has_events)
     {
       fds_lim = max_fds + 1;
+#ifdef HAVE_PGTK
+      nfds = thread_select (embfiber_active ? pgtk_embfiber_select : pselect,
+                            fds_lim, &all_rfds,
+                            have_wfds ? &all_wfds : NULL, efds,
+                            tmop, sigmask);
+#else
       nfds = thread_select (pselect, fds_lim,
-			    &all_rfds, have_wfds ? &all_wfds : NULL, efds,
-			    tmop, sigmask);
+                            &all_rfds, have_wfds ? &all_wfds : NULL, efds,
+                            tmop, sigmask);
+#endif
     }
   else
     {
@@ -216,6 +261,10 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
       if (efds)
 	FD_ZERO (efds);
       our_fds++;
+      /* No thread_select call will balance a context acquisition in this
+         fast path.  */
+      if (select_lock_acquired)
+        release_select_lock ();
     }
 #endif
 
@@ -270,7 +319,9 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
 
   if (need_to_dispatch)
     {
-      acquire_select_lock (context);
+      bool dispatch_lock_acquired = !g_main_context_is_owner (context);
+      if (dispatch_lock_acquired)
+        acquire_select_lock (context);
 
       int pselect_errno = errno;
       /* Prevent g_main_dispatch recursion, that would occur without
@@ -281,7 +332,8 @@ xg_select (int fds_lim, fd_set *rfds, fd_set *wfds, fd_set *efds,
         g_main_context_dispatch (context);
       unblock_input ();
       errno = pselect_errno;
-      release_select_lock ();
+      if (dispatch_lock_acquired)
+        release_select_lock ();
     }
 
   /* To not have to recalculate timeout, return like this.  */

@@ -465,7 +465,7 @@ base_obj = dispnew.o frame.o scroll.o xdisp.o menu.o $(XMENU_OBJ) window.o     \
 	$(XWIDGETS_OBJ) 						       \
 	profiler.o decompress.o 					       \
 	thread.o systhread.o sqlite.o  treesit.o			       \
-	itree.o json.o embemacs.o embfiber.o				       \
+	itree.o json.o embemacs.o embfiber.o pgtkembed.o			       \
 	$(MSDOS_OBJ) $(MSDOS_X_OBJ) $(NS_OBJ) $(CYGWIN_OBJ) $(FONT_OBJ)        \
 	$(W32_OBJ) $(WINDOW_SYSTEM_OBJ) $(XGSELOBJ)			       \
 	$(HAIKU_OBJ) $(PGTK_OBJ) $(ANDROID_OBJ)
@@ -484,7 +484,7 @@ SOME_MACHINE_OBJECTS = dosfns.o msdos.o \
   w32.o w32console.o w32cygwinx.o w32fns.o w32heap.o w32inevt.o w32notify.o \
   w32menu.o w32proc.o w32reg.o w32select.o w32term.o w32xfns.o \
   w16select.o widget.o xfont.o ftfont.o xftfont.o gtkutil.o \
-  xsettings.o xgselect.o termcap.o hbfont.o \
+  xsettings.o xgselect.o termcap.o hbfont.o pgtkembed.o \
   haikuterm.o haikufns.o haikumenu.o haikufont.o androidterm.o androidfns.o \
   androidfont.o androidselect.c androidvfs.c sfntfont-android.c sfntfont.c
 
@@ -786,8 +786,24 @@ doc.o: buildobj.h
 emacs.res: FORCE
 	$(MAKE) -C ../nt ../src/emacs.res
 
-## Shared-library build used by embemacs hosts.
-## On x86_64, configure/build with -fPIC.
+## embfiber's hand-written x86_64 stack switch does not switch Intel CET
+## shadow-stack state.  Compile the switch without a SHSTK property; the
+## public startup path also rejects a host process with SHSTK already active.
+EMBFIBER_CET_CFLAGS = $(if $(filter x86_64-%-linux-gnu,@configuration@),-fcf-protection=none)
+embfiber.o: CFLAGS += $(EMBFIBER_CET_CFLAGS)
+
+## Shared-library builds used by embemacs hosts.
+## On Linux, configure/build with -fPIC.
+ifeq ($(SYSTEM_TYPE),gnu/linux)
+libemacs.so: $(ALLOBJS) $(LIBEGNU_ARCHIVE) $(EMACSRES) \
+		$(MAKE_PDUMPER_FINGERPRINT) $(etc)/DOC
+	$(AM_V_CCLD)$(CC) -shared -Wl,-soname,libemacs.so -o $@ \
+		$(ALL_CFLAGS) $(TEMACS_LDFLAGS) $(LDFLAGS) \
+		$(ALLOBJS) $(LIBEGNU_ARCHIVE) $(LIBES)
+	$(AM_V_at)$(MAKE_PDUMPER_FINGERPRINT) $@
+endif
+
+## On x86_64 macOS, configure/build with -fPIC.
 libemacs.dylib: $(ALLOBJS) $(LIBEGNU_ARCHIVE) $(EMACSRES) \
 		$(MAKE_PDUMPER_FINGERPRINT) $(etc)/DOC
 	$(AM_V_CCLD)$(CC) -dynamiclib -o $@ \
@@ -800,8 +816,8 @@ ifeq ($(DO_CODESIGN),yes)
 endif
 
 .PHONY: check-embfiber
-check-embfiber: embfiber.c embfiber.h embemacs.h
-	$(AM_V_CC)$(CC) -DEMBFIBER_TEST -Wall -Wextra -o embfiber_test$(EXEEXT) embfiber.c
+check-embfiber: $(srcdir)/embfiber.c $(srcdir)/embfiber.h $(srcdir)/embemacs.h
+	$(AM_V_CC)$(CC) $(EMBFIBER_CET_CFLAGS) -DEMBFIBER_TEST -Wall -Wextra -o embfiber_test$(EXEEXT) $(srcdir)/embfiber.c
 	$(AM_V_at)./embfiber_test$(EXEEXT)
 
 .PHONY: ns-app

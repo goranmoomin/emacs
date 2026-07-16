@@ -139,6 +139,16 @@ struct xg_frame_tb_info
   GtkTextDirection dir;
 };
 
+/* PGTK embedding destroys the temporary outer GtkWindow but preserves the
+   vbox hierarchy.  Store toolbar bookkeeping on whichever frame-owned GTK
+   object survives.  */
+static GtkWidget *
+xg_frame_tb_info_widget (struct frame *f)
+{
+  GtkWidget *widget = FRAME_GTK_OUTER_WIDGET (f);
+  return widget != NULL ? widget : f->output_data.xp->vbox_widget;
+}
+
 #ifdef HAVE_XWIDGETS
 bool xg_gtk_initialized;        /* Used to make sure xwidget calls are possible */
 #endif
@@ -766,7 +776,7 @@ xg_check_special_colors (struct frame *f,
 
   block_input ();
 #ifdef HAVE_GTK3
-  gsty = gtk_widget_get_style_context (FRAME_GTK_OUTER_WIDGET (f));
+  gsty = gtk_widget_get_style_context (FRAME_WIDGET (f));
   state = GTK_STATE_FLAG_SELECTED | GTK_STATE_FLAG_FOCUSED;
 
   if (get_fg)
@@ -1182,6 +1192,15 @@ xg_frame_set_char_size (struct frame *f, int width, int height)
     = height + FRAME_TOOLBAR_HEIGHT (f) + FRAME_MENUBAR_HEIGHT (f);
   int outer_width = width + FRAME_TOOLBAR_WIDTH (f);
   int scale = xg_get_scale (f);
+
+#ifdef HAVE_PGTK
+  if (FRAME_PGTK_EMBEDDED_P (f))
+    {
+      gtk_widget_queue_resize (FRAME_GTK_WIDGET (f));
+      gtk_widget_queue_draw (FRAME_GTK_WIDGET (f));
+      return;
+    }
+#endif
 
 #ifndef HAVE_PGTK
   gtk_window_get_size (GTK_WINDOW (FRAME_GTK_OUTER_WIDGET (f)),
@@ -1939,7 +1958,7 @@ xg_free_frame_widgets (struct frame *f)
     {
       xp_output *x = f->output_data.xp;
       struct xg_frame_tb_info *tbinfo
-        = g_object_get_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
+        = g_object_get_data (G_OBJECT (xg_frame_tb_info_widget (f)),
                              TB_INFO_KEY);
       if (tbinfo)
         xfree (tbinfo);
@@ -3117,15 +3136,18 @@ xg_mark_data (void)
     {
       struct frame *f = XFRAME (frame);
 
-      if ((FRAME_X_P (f) || FRAME_PGTK_P (f)) && FRAME_GTK_OUTER_WIDGET (f))
+      if (FRAME_X_P (f) || FRAME_PGTK_P (f))
         {
-          struct xg_frame_tb_info *tbinfo
-            = g_object_get_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
-                                 TB_INFO_KEY);
-          if (tbinfo)
+          GtkWidget *tb_widget = xg_frame_tb_info_widget (f);
+          if (tb_widget != NULL)
             {
-              mark_object (tbinfo->last_tool_bar);
-              mark_object (tbinfo->style);
+              struct xg_frame_tb_info *tbinfo
+                = g_object_get_data (G_OBJECT (tb_widget), TB_INFO_KEY);
+              if (tbinfo)
+                {
+                  mark_object (tbinfo->last_tool_bar);
+                  mark_object (tbinfo->style);
+                }
             }
         }
     }
@@ -5527,9 +5549,9 @@ xg_create_tool_bar (struct frame *f)
 #ifdef HAVE_GTK3
   GtkStyleContext *gsty;
 #endif
+  GtkWidget *tb_widget = xg_frame_tb_info_widget (f);
   struct xg_frame_tb_info *tbinfo
-    = g_object_get_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
-                         TB_INFO_KEY);
+    = g_object_get_data (G_OBJECT (tb_widget), TB_INFO_KEY);
   if (! tbinfo)
     {
       tbinfo = xmalloc (sizeof (*tbinfo));
@@ -5538,9 +5560,7 @@ xg_create_tool_bar (struct frame *f)
       tbinfo->hmargin = tbinfo->vmargin = 0;
       tbinfo->dir = GTK_TEXT_DIR_NONE;
       tbinfo->n_last_items = 0;
-      g_object_set_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
-                         TB_INFO_KEY,
-                         tbinfo);
+      g_object_set_data (G_OBJECT (tb_widget), TB_INFO_KEY, tbinfo);
     }
 
   x->toolbar_widget = gtk_toolbar_new ();
@@ -5869,7 +5889,7 @@ update_frame_tool_bar (struct frame *f)
     return;
 
 #ifdef HAVE_PGTK
-  if (! FRAME_GTK_OUTER_WIDGET (f))
+  if (!FRAME_GTK_OUTER_WIDGET (f) && !FRAME_PGTK_EMBEDDED_P (f))
     return;
 #endif
 
@@ -5907,7 +5927,7 @@ update_frame_tool_bar (struct frame *f)
   icon_theme = gtk_icon_theme_get_for_screen (screen);
 
   /* Are we up to date? */
-  tbinfo = g_object_get_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
+  tbinfo = g_object_get_data (G_OBJECT (xg_frame_tb_info_widget (f)),
                               TB_INFO_KEY);
 
   if (! NILP (tbinfo->last_tool_bar) && ! NILP (f->tool_bar_items)
@@ -6193,14 +6213,12 @@ free_frame_tool_bar (struct frame *f)
       FRAME_TOOLBAR_TOP_HEIGHT (f) = FRAME_TOOLBAR_BOTTOM_HEIGHT (f) = 0;
       FRAME_TOOLBAR_LEFT_WIDTH (f) = FRAME_TOOLBAR_RIGHT_WIDTH (f) = 0;
 
-      tbinfo = g_object_get_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
-                                  TB_INFO_KEY);
+      GtkWidget *tb_widget = xg_frame_tb_info_widget (f);
+      tbinfo = g_object_get_data (G_OBJECT (tb_widget), TB_INFO_KEY);
       if (tbinfo)
         {
           xfree (tbinfo);
-          g_object_set_data (G_OBJECT (FRAME_GTK_OUTER_WIDGET (f)),
-                             TB_INFO_KEY,
-                             NULL);
+          g_object_set_data (G_OBJECT (tb_widget), TB_INFO_KEY, NULL);
         }
 
       adjust_frame_size (f, -1, -1, 2, 0, Qtool_bar_lines);

@@ -361,6 +361,9 @@ nt/emacsclient.rc
 src/gdb.ini
 /var/
 
+# Out-of-tree embemacs PGTK build.
+/build-pgtk/
+
 # Seccomp filter files.
 lib-src/seccomp-filter.bpf
 lib-src/seccomp-filter.pfc
