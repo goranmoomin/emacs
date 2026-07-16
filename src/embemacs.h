@@ -181,10 +181,12 @@ extern int embemacs_set_title_callback (embemacs_title_callback callback,
    after the callback returns, the fiber is terminated permanently and
    control returns to the host run loop; further embemacs_eval_async
    calls fail with EMBEMACS_ERR_NOT_RUNNING, and the embedded view is
-   defunct.  A typical host records EXIT_CODE and schedules app termination
-   or view teardown after the callback returns (for example with
-   dispatch_async or g_idle_add).  Without this callback, kill-emacs calls
-   exit() as before.  Restarting Emacs in the same process is not supported. */
+   defunct.  A typical host records EXIT_CODE and requests host-loop
+   termination without blocking.  `g_main_loop_quit` may be called directly;
+   AppKit hosts commonly use `dispatch_async`.  Destroy the embedded view or
+   other Emacs-owned UI only after the callback returns.  Without this
+   callback, kill-emacs calls exit() as before.  Restarting Emacs in the same
+   process is not supported. */
 typedef void (*embemacs_exit_callback) (int exit_code, void *context);
 extern int embemacs_set_exit_callback (embemacs_exit_callback callback,
                                        void *context);

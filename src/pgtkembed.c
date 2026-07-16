@@ -353,6 +353,11 @@ pgtk_embfiber_install_driver (void)
   if (source == NULL)
     goto fail;
   wait = (struct pgtk_embfiber_wait_source *) source;
+  /* g_source_new zero-fills the extension; use invalid descriptors until
+     ownership is explicitly transferred so finalize is safe on every path. */
+  wait->epoll_fd = -1;
+  wait->timer_fd = -1;
+  wait->epoll_poll.fd = -1;
   wait->epoll_fd = epoll_fd;
   wait->timer_fd = timer_fd;
   epoll_fd = -1;
